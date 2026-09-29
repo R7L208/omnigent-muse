@@ -31,14 +31,6 @@ from omnigent.community.harness.muse.inner.muse_executor import (
     MuseTurnStarted,
 )
 
-pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
-
-
 class FakeTransport:
     def __init__(self, events: list[MuseEvent | BaseException] | None = None) -> None:
         self.events = events or []
