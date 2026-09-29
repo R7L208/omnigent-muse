@@ -1,0 +1,448 @@
+"""Omnigent executor semantics for a Muse Session Protocol transport.
+
+The executor owns prompt, policy, approval, and event translation behavior. The
+transport owns MSP framing and process lifecycle, and is injected so this layer
+can be tested without a Muse binary or a particular client implementation.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from omnigent.inner.executor import (
+    Executor,
+    ExecutorConfig,
+    ExecutorError,
+    ExecutorEvent,
+    Message,
+    ReasoningChunk,
+    TextChunk,
+    ToolCallComplete,
+    ToolCallRequest,
+    ToolCallStatus,
+    ToolSpec,
+    TurnCancelled,
+    TurnComplete,
+    describe_exception,
+)
+
+logger = logging.getLogger(__name__)
+
+type JsonObject = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MuseTextDelta:
+    text: str
+
+
+@dataclass(frozen=True)
+class MuseReasoningDelta:
+    text: str
+
+
+@dataclass(frozen=True)
+class MuseTurnStarted:
+    turn_id: str
+
+
+@dataclass(frozen=True)
+class MuseToolCall:
+    call_id: str
+    name: str
+    arguments: object
+    state: str
+    output: object = None
+    error: str | None = None
+    duration_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class MuseApprovalChoice:
+    choice_id: str
+    label: str
+    decision: str
+
+
+@dataclass(frozen=True)
+class MuseApprovalRequested:
+    approval_id: str
+    tool_name: str
+    arguments: object
+    choices: tuple[MuseApprovalChoice, ...] = ()
+
+
+@dataclass(frozen=True)
+class MuseTurnFinished:
+    turn_id: str
+    state: str
+    usage: JsonObject = field(default_factory=dict)
+    error: str | None = None
+    retryable: bool = False
+
+
+type MuseEvent = (
+    MuseTextDelta
+    | MuseReasoningDelta
+    | MuseTurnStarted
+    | MuseToolCall
+    | MuseApprovalRequested
+    | MuseTurnFinished
+)
+
+
+class MuseTransportError(Exception):
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class MuseTransport(Protocol):
+    async def start_session(
+        self,
+        *,
+        workspace_root: str | None,
+        model: str | None,
+        approval_mode: str,
+    ) -> str: ...
+
+    def run_turn(
+        self,
+        session_id: str,
+        *,
+        text: str,
+        reasoning_effort: str | None,
+    ) -> AsyncIterator[MuseEvent]: ...
+
+    async def decide_approval(
+        self, session_id: str, approval_id: str, choice_id: str
+    ) -> None: ...
+
+    async def interrupt_turn(self, session_id: str, turn_id: str | None) -> bool: ...
+
+    async def close(self) -> None: ...
+
+
+class _PolicyVerdict(Protocol):
+    action: str
+
+
+type _PolicyEvaluator = Callable[[str, JsonObject], Awaitable[_PolicyVerdict]]
+type _ElicitationHandler = Callable[[str, JsonObject], Awaitable[bool]]
+type _ChoiceHandler = Callable[[str, JsonObject, Sequence[str]], Awaitable[str | None]]
+
+
+class MuseExecutor(Executor):
+    """Translate one persistent Muse session into Omnigent executor events."""
+
+    def __init__(
+        self,
+        transport_factory: Callable[[], MuseTransport],
+        *,
+        cwd: str | None = None,
+        model: str | None = None,
+        approval_mode: str = "onRequest",
+        reasoning_effort: str | None = None,
+    ) -> None:
+        self._transport_factory = transport_factory
+        self._cwd = cwd
+        self._model = model
+        self._approval_mode = approval_mode
+        self._reasoning_effort = reasoning_effort
+        self._transport: MuseTransport | None = None
+        self._session_id: str | None = None
+        self._active_turn_id: str | None = None
+        self._system_prompt_sent = False
+        self._closed = False
+        self._policy_evaluator: _PolicyEvaluator | None = None
+        self._elicitation_handler: _ElicitationHandler | None = None
+        self._elicitation_choice_handler: _ChoiceHandler | None = None
+        self._tool_calls: dict[str, tuple[str, JsonObject]] = {}
+
+    def supports_streaming(self) -> bool:
+        return True
+
+    def supports_tool_calling(self) -> bool:
+        return True
+
+    def handles_tools_internally(self) -> bool:
+        return True
+
+    async def _ensure_session(self, model: str | None) -> str:
+        if self._session_id is not None:
+            return self._session_id
+        if self._closed:
+            raise MuseTransportError("executor is closed")
+        transport = self._transport_factory()
+        session_id = await transport.start_session(
+            workspace_root=self._cwd,
+            model=model,
+            approval_mode=self._approval_mode,
+        )
+        self._transport = transport
+        self._session_id = session_id
+        self._model = model
+        return session_id
+
+    @staticmethod
+    def _latest_user_text(messages: list[Message]) -> str:
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = [
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") in {"text", "input_text"}
+                    and isinstance(block.get("text"), str)
+                ]
+                return "\n".join(part for part in parts if part)
+            return json.dumps(content, ensure_ascii=True)
+        return ""
+
+    @staticmethod
+    def _arguments(value: object) -> JsonObject:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {"raw": value}
+            if isinstance(parsed, dict):
+                return parsed
+            return {"value": parsed}
+        return {"value": value} if value is not None else {}
+
+    @staticmethod
+    def _usage(raw: JsonObject) -> JsonObject | None:
+        if not raw:
+            return None
+        usage: JsonObject = {}
+        mappings = {
+            "inputTokens": "input_tokens",
+            "outputTokens": "output_tokens",
+            "cachedTokens": "cache_read_input_tokens",
+            "reasoningTokens": "reasoning_tokens",
+        }
+        for source, target in mappings.items():
+            value = raw.get(source)
+            if isinstance(value, int) and not isinstance(value, bool):
+                usage[target] = value
+        if "input_tokens" in usage or "output_tokens" in usage:
+            usage["total_tokens"] = int(usage.get("input_tokens", 0)) + int(
+                usage.get("output_tokens", 0)
+            )
+        return usage or None
+
+    @staticmethod
+    def _choice(
+        choices: tuple[MuseApprovalChoice, ...], decision: str
+    ) -> MuseApprovalChoice | None:
+        return next((choice for choice in choices if choice.decision == decision), None)
+
+    async def _resolve_approval(
+        self, session_id: str, event: MuseApprovalRequested
+    ) -> None:
+        transport = self._transport
+        if transport is None:
+            raise MuseTransportError("approval arrived before transport startup")
+        arguments = self._arguments(event.arguments)
+        action: str | None = None
+        if self._policy_evaluator is not None:
+            try:
+                verdict = await self._policy_evaluator(
+                    "PHASE_TOOL_CALL",
+                    {"name": event.tool_name, "arguments": arguments},
+                )
+                action = getattr(verdict, "action", None)
+            except Exception as exc:  # noqa: BLE001 - policy failure falls back to consent
+                logger.warning(
+                    "Muse tool policy failed for %s: %s", event.tool_name, exc
+                )
+
+        picked: MuseApprovalChoice | None = None
+        if action == "POLICY_ACTION_DENY":
+            picked = self._choice(event.choices, "deny")
+        elif action == "POLICY_ACTION_ALLOW":
+            picked = self._choice(event.choices, "allow")
+        else:
+            picked = await self._ask_user(event, arguments)
+
+        if picked is None:
+            picked = self._choice(event.choices, "deny")
+        if picked is None:
+            raise MuseTransportError(
+                f"approval {event.approval_id} has no usable deny choice"
+            )
+        await transport.decide_approval(session_id, event.approval_id, picked.choice_id)
+
+    async def _ask_user(
+        self, event: MuseApprovalRequested, arguments: JsonObject
+    ) -> MuseApprovalChoice | None:
+        handler = self._elicitation_choice_handler
+        labels = [choice.label for choice in event.choices]
+        if handler is not None and len(set(labels)) == len(labels):
+            selected = await handler(event.tool_name, arguments, labels)
+            return next(
+                (choice for choice in event.choices if choice.label == selected), None
+            )
+        if self._elicitation_handler is not None:
+            allowed = await self._elicitation_handler(event.tool_name, arguments)
+            return self._choice(event.choices, "allow" if allowed else "deny")
+        # ExecutorAdapter normally installs a handler. Fail closed when policy
+        # explicitly requested consent; direct standalone use otherwise follows
+        # the first-party agent-loop convention and permits the narrowest grant.
+        return self._choice(event.choices, "deny") or self._choice(
+            event.choices, "allow"
+        )
+
+    def _translate_tool(self, event: MuseToolCall) -> ExecutorEvent | None:
+        arguments = self._arguments(event.arguments)
+        if event.state in {"started", "inProgress"}:
+            self._tool_calls[event.call_id] = (event.name, arguments)
+            return ToolCallRequest(
+                event.name, arguments, metadata={"call_id": event.call_id}
+            )
+        cached_name, _ = self._tool_calls.pop(
+            event.call_id, (event.name or "tool", arguments)
+        )
+        statuses = {
+            "completed": ToolCallStatus.SUCCESS,
+            "failed": ToolCallStatus.ERROR,
+            "timedOut": ToolCallStatus.ERROR,
+            "rejected": ToolCallStatus.BLOCKED,
+            "cancelled": ToolCallStatus.CANCELLED,
+        }
+        status = statuses.get(event.state)
+        if status is None:
+            return None
+        return ToolCallComplete(
+            cached_name,
+            status,
+            result=event.output,
+            error=event.error,
+            duration_ms=event.duration_ms,
+            metadata={"call_id": event.call_id},
+        )
+
+    async def run_turn(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        system_prompt: str,
+        config: ExecutorConfig | None = None,
+    ) -> AsyncIterator[ExecutorEvent]:
+        requested_model = config.model if config is not None else None
+        if (
+            requested_model
+            and requested_model != self._model
+            and (self._model is not None or self._session_id is not None)
+        ):
+            yield ExecutorError(
+                f"Muse session uses model {self._model!r}; cannot apply per-turn "
+                f"model {requested_model!r} without restarting the session."
+            )
+            return
+        effective_model = requested_model or self._model
+        try:
+            session_id = await self._ensure_session(effective_model)
+        except Exception as exc:  # noqa: BLE001 - startup failures become terminal events
+            yield ExecutorError(f"Muse startup failed: {describe_exception(exc)}")
+            return
+
+        text = self._latest_user_text(messages)
+        if not self._system_prompt_sent:
+            if system_prompt:
+                text = f"{system_prompt}\n\n{text}" if text else system_prompt
+            self._system_prompt_sent = True
+        effort = self._reasoning_effort
+        if config is not None:
+            override = config.extra.get("reasoning_effort")
+            if isinstance(override, str) and override:
+                effort = override
+
+        accumulated: list[str] = []
+        self._tool_calls.clear()
+        try:
+            assert self._transport is not None
+            async for event in self._transport.run_turn(
+                session_id, text=text, reasoning_effort=effort
+            ):
+                if isinstance(event, MuseTurnStarted):
+                    self._active_turn_id = event.turn_id
+                elif isinstance(event, MuseTextDelta):
+                    if event.text:
+                        accumulated.append(event.text)
+                        yield TextChunk(event.text)
+                elif isinstance(event, MuseReasoningDelta):
+                    if event.text:
+                        yield ReasoningChunk(event.text, "reasoning_text")
+                elif isinstance(event, MuseToolCall):
+                    translated = self._translate_tool(event)
+                    if translated is not None:
+                        yield translated
+                elif isinstance(event, MuseApprovalRequested):
+                    await self._resolve_approval(session_id, event)
+                elif isinstance(event, MuseTurnFinished):
+                    if event.state == "completed":
+                        yield TurnComplete(
+                            response="".join(accumulated),
+                            usage=self._usage(event.usage),
+                        )
+                    elif event.state == "cancelled":
+                        yield TurnCancelled(event.error or "user_cancelled")
+                    else:
+                        yield ExecutorError(
+                            event.error or f"Muse turn {event.state}",
+                            retryable=event.retryable,
+                            usage=self._usage(event.usage),
+                        )
+                    return
+            yield ExecutorError("Muse stream ended without a terminal turn event")
+        except MuseTransportError as exc:
+            yield ExecutorError(
+                f"Muse transport error: {describe_exception(exc)}",
+                retryable=exc.retryable,
+            )
+        except Exception as exc:
+            logger.exception("Muse turn failed")
+            yield ExecutorError(f"Muse turn failed: {describe_exception(exc)}")
+        finally:
+            self._active_turn_id = None
+            self._tool_calls.clear()
+
+    async def interrupt_session(self, session_key: str) -> bool:
+        if (
+            self._transport is None
+            or self._session_id is None
+            or self._active_turn_id is None
+        ):
+            return False
+        try:
+            return await self._transport.interrupt_turn(
+                self._session_id, self._active_turn_id
+            )
+        except Exception as exc:  # noqa: BLE001 - interruption is best effort
+            logger.debug("Muse interrupt failed: %s", exc)
+            return False
+
+    async def close_session(self, session_key: str) -> None:
+        """No-op: one Muse session is owned by this executor process."""
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        transport, self._transport = self._transport, None
+        self._session_id = None
+        if transport is not None:
+            await transport.close()
