@@ -272,6 +272,24 @@ async def test_ask_without_elicitation_fails_closed() -> None:
     assert transport.decisions == [("session-1", "approval-1", "deny")]
 
 
+async def test_standalone_without_policy_or_elicitation_fails_closed() -> None:
+    approval = MuseApprovalRequested(
+        "approval-1",
+        "shell",
+        {},
+        choices=(
+            MuseApprovalChoice("once", "Allow once", "allow"),
+            MuseApprovalChoice("never", "Deny", "deny"),
+        ),
+    )
+    transport = FakeTransport([approval, MuseTurnFinished("turn-1", "completed")])
+    executor = MuseExecutor(lambda: transport)
+
+    await collect(executor)
+
+    assert transport.decisions == [("session-1", "approval-1", "never")]
+
+
 async def test_cancelled_and_failed_turns_are_terminal_events() -> None:
     cancelled = FakeTransport([MuseTurnFinished("t", "cancelled", error="stopped")])
     failed = FakeTransport(
