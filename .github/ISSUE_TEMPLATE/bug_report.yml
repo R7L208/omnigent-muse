@@ -1,0 +1,74 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Give minimal steps to reproduce the issue. If direct steps aren't
+        available, provide other actionable evidence, such as a controlled
+        test, diagnostics, or analysis of the failing code path.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The omnigent-muse version or commit you are running.
+      placeholder: e.g. 0.1.0 or abc1234
+    validations:
+      required: false
+
+  - type: input
+    id: omnigent-version
+    attributes:
+      label: Omnigent version
+      description: Output of `omnigent --version`, if available.
+    validations:
+      required: false
+
+  - type: input
+    id: muse-version
+    attributes:
+      label: Muse version
+      description: Output of `muse --version`, if available.
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: Operating system and version.
+      placeholder: e.g. Ubuntu 24.04 or macOS 15.1
+    validations:
+      required: false
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Observed impact
+      options:
+        - All users or sessions
+        - Most users or sessions
+        - Some users or sessions
+        - One narrow or edge case
+        - Unknown
+    validations:
+      required: false
