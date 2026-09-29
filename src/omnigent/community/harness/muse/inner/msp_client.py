@@ -505,7 +505,7 @@ class MspClient:
                 self._route_frame(frame, line)
         except asyncio.CancelledError:
             pass
-        except Exception as exc:  # noqa: BLE001 — the loop must fail futures, never die silent
+        except Exception as exc:
             logger.exception("%s: stdout reader error: %s", self._label, exc)
             self._finish(exc)
 
@@ -576,7 +576,7 @@ class MspClient:
         for handler in list(self._subscribers):
             try:
                 handler(method, params)
-            except Exception as exc:  # noqa: BLE001 — one bad subscriber must not starve others
+            except Exception as exc:
                 logger.exception(
                     "%s: notification subscriber failed: %s", self._label, exc
                 )

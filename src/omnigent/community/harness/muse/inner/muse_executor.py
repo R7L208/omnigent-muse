@@ -178,11 +178,24 @@ class MuseExecutor(Executor):
         if self._closed:
             raise MuseTransportError("executor is closed")
         transport = self._transport_factory()
-        session_id = await transport.start_session(
-            workspace_root=self._cwd,
-            model=model,
-            approval_mode=self._approval_mode,
-        )
+        try:
+            session_id = await transport.start_session(
+                workspace_root=self._cwd,
+                model=model,
+                approval_mode=self._approval_mode,
+            )
+        except BaseException:
+            # The factory already spawned a host; close it so a failed startup
+            # does not orphan the process. Cleanup is best effort.
+            try:
+                await transport.close()
+            except Exception:
+                # Secondary close failure is non-fatal; keep raising the original.
+                logger.debug(
+                    "Muse transport close after failed start_session failed",
+                    exc_info=True,
+                )
+            raise
         self._transport = transport
         self._session_id = session_id
         self._model = model
@@ -298,9 +311,9 @@ class MuseExecutor(Executor):
         if self._elicitation_handler is not None:
             allowed = await self._elicitation_handler(event.tool_name, arguments)
             return self._choice(event.choices, "allow" if allowed else "deny")
-        # ExecutorAdapter normally installs a handler. Fail closed when policy
-        # explicitly requested consent; direct standalone use otherwise follows
-        # the first-party agent-loop convention and permits the narrowest grant.
+        # ExecutorAdapter normally installs an elicitation handler. When it has
+        # not (direct standalone use), fail closed: prefer the deny choice and
+        # fall back to allow only if the host offered no deny option.
         return self._choice(event.choices, "deny") or self._choice(
             event.choices, "allow"
         )
@@ -308,7 +321,13 @@ class MuseExecutor(Executor):
     def _translate_tool(self, event: MuseToolCall) -> ExecutorEvent | None:
         arguments = self._arguments(event.arguments)
         if event.state in {"started", "inProgress"}:
+            already_seen = event.call_id in self._tool_calls
             self._tool_calls[event.call_id] = (event.name, arguments)
+            # Emit a single begin-event per call: "started" followed by one or
+            # more "inProgress" updates for the same call_id refresh the cache
+            # but must not duplicate the request downstream.
+            if already_seen:
+                return None
             return ToolCallRequest(
                 event.name, arguments, metadata={"call_id": event.call_id}
             )
@@ -360,10 +379,8 @@ class MuseExecutor(Executor):
             return
 
         text = self._latest_user_text(messages)
-        if not self._system_prompt_sent:
-            if system_prompt:
-                text = f"{system_prompt}\n\n{text}" if text else system_prompt
-            self._system_prompt_sent = True
+        if not self._system_prompt_sent and system_prompt:
+            text = f"{system_prompt}\n\n{text}" if text else system_prompt
         effort = self._reasoning_effort
         if config is not None:
             override = config.extra.get("reasoning_effort")
@@ -377,6 +394,11 @@ class MuseExecutor(Executor):
             async for event in self._transport.run_turn(
                 session_id, text=text, reasoning_effort=effort
             ):
+                # Receiving any event proves the host accepted our input (which
+                # carried the system prompt on the first turn); only now is it
+                # safe to stop re-injecting it. If run_turn raises before
+                # yielding, this stays False so the next turn re-sends it.
+                self._system_prompt_sent = True
                 if isinstance(event, MuseTurnStarted):
                     self._active_turn_id = event.turn_id
                 elif isinstance(event, MuseTextDelta):

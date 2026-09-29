@@ -37,7 +37,7 @@ def main() -> int:
     bad_response = os.environ.get("FAKE_MSP_BAD_RESPONSE") == "1"
     backpressure_once = os.environ.get("FAKE_MSP_BACKPRESSURE_ONCE") == "1"
     log_path = os.environ.get("FAKE_MSP_LOG")
-    log = open(log_path, "a") if log_path else None  # noqa: PTH123, SIM115
+    log = open(log_path, "a") if log_path else None  # noqa: SIM115
     backpressure_spent = False
     deny = {
         m.strip() for m in os.environ.get("FAKE_MSP_DENY", "").split(",") if m.strip()

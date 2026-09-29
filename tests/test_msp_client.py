@@ -8,6 +8,7 @@ credentials, or network needed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -222,6 +223,81 @@ async def test_request_timeout(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError, match="usage/read"):
             await client.read_usage(session_id, timeout=0.2)
     finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for two bugs found by code review in PR #1's msp_client.py.
+# They are xfail today because the fixes live on PR #1's branch; once that
+# author lands the fix, each test flips to xpass — remove the marker then.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason="PR #1 finding #4: request() timeout never pops the pending future "
+    "from self._pending, leaking an entry per timed-out request. Remove this "
+    "marker once the fix lands.",
+    strict=False,
+)
+async def test_request_timeout_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_HANG="usage/read")
+    try:
+        session_id = (await client.start_session())["sessionId"]
+        with pytest.raises(TimeoutError, match="usage/read"):
+            await client.read_usage(session_id, timeout=0.2)
+        # The completed start_session request was popped by the reader; the
+        # timed-out request must be popped too, or a long-lived client grows
+        # self._pending without bound.
+        assert client._pending == {}
+    finally:
+        await client.close()
+
+
+@pytest.mark.xfail(
+    reason="PR #1 finding #5: cancelling the writer mid-drain sets CancelledError "
+    "on the in-flight request's future, so the caller sees CancelledError instead "
+    "of MspConnectionClosed. Remove this marker once the fix lands.",
+    strict=False,
+)
+async def test_pending_request_reports_closed_when_writer_cancelled(
+    tmp_path: Path,
+) -> None:
+    client = await _spawn(tmp_path)
+    assert client._proc is not None
+    real_stdin = client._proc.stdin
+    try:
+        # Wedge the in-flight write inside drain() so the writer task is parked
+        # on our request's frame when teardown cancels it.
+        class _BlockingStdin:
+            def write(self, data: bytes) -> None: ...
+
+            async def drain(self) -> None:
+                await asyncio.Event().wait()
+
+            def close(self) -> None: ...
+
+        # Drain the handshake's queued frames first so the writer parks on our
+        # request below, not on a leftover future-less notification.
+        await client.flush()
+        client._proc.stdin = _BlockingStdin()  # type: ignore[assignment]
+
+        pending = asyncio.ensure_future(
+            client.request("usage/read", {"sessionId": "s"}, timeout=5)
+        )
+        # Let the request enqueue its frame and the writer park in drain().
+        await asyncio.sleep(0.05)
+
+        # Teardown cancels the writer while our write is wedged in drain().
+        client._writer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await client._writer_task
+
+        # The caller should learn the connection is closing, not inherit the
+        # writer's own cancellation.
+        with pytest.raises(MspConnectionClosed):
+            await pending
+    finally:
+        client._proc.stdin = real_stdin
         await client.close()
 
 

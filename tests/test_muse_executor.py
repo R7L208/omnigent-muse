@@ -343,6 +343,101 @@ async def test_interrupt_delegates_for_live_turn() -> None:
     await task
 
 
+class FailFirstTurnTransport(FakeTransport):
+    """Raises on the first run_turn (host dies mid-turn), succeeds afterward."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.turn_calls = 0
+
+    async def run_turn(
+        self,
+        session_id: str,
+        *,
+        text: str,
+        reasoning_effort: str | None,
+    ) -> AsyncIterator[MuseEvent]:
+        self.turns.append(
+            {
+                "session_id": session_id,
+                "text": text,
+                "reasoning_effort": reasoning_effort,
+            }
+        )
+        self.turn_calls += 1
+        if self.turn_calls == 1:
+            raise MuseTransportError("host died mid-turn")
+        yield MuseTurnFinished("turn-2", "completed")
+
+
+class FailStartTransport(FakeTransport):
+    """start_session fails after the factory has spawned the host."""
+
+    async def start_session(self, **kwargs: Any) -> str:
+        self.starts.append(kwargs)
+        raise MuseTransportError("handshake rejected")
+
+
+async def test_system_prompt_resent_after_failed_first_turn() -> None:
+    transport = FailFirstTurnTransport()
+    executor = MuseExecutor(lambda: transport)
+
+    first = await collect(executor)
+    assert isinstance(first[0], ExecutorError)
+
+    await collect(executor)
+
+    # The first turn never reached the host, so the prompt must ride along again.
+    assert transport.turns[0]["text"] == "Follow the project instructions.\n\nhello"
+    assert transport.turns[1]["text"] == "Follow the project instructions.\n\nhello"
+
+
+async def test_transport_closed_when_start_session_fails() -> None:
+    transport = FailStartTransport()
+    events = await collect(MuseExecutor(lambda: transport))
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert "startup failed" in error.message.lower()
+    assert transport.closed is True
+
+
+async def test_tool_call_request_emitted_once_across_started_and_in_progress() -> None:
+    transport = FakeTransport(
+        [
+            MuseToolCall("call-1", "shell", {"command": "pwd"}, "started"),
+            MuseToolCall("call-1", "shell", {"command": "pwd"}, "inProgress"),
+            MuseToolCall("call-1", "shell", {}, "completed", output="/tmp"),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+    events = await collect(MuseExecutor(lambda: transport))
+
+    requests = [event for event in events if isinstance(event, ToolCallRequest)]
+    completes = [event for event in events if isinstance(event, ToolCallComplete)]
+    assert len(requests) == 1
+    assert len(completes) == 1
+    assert completes[0].status is ToolCallStatus.SUCCESS
+
+
+async def test_ask_without_elicitation_allows_when_no_deny_offered() -> None:
+    approval = MuseApprovalRequested(
+        "approval-1",
+        "shell",
+        {},
+        choices=(MuseApprovalChoice("only", "Allow", "allow"),),
+    )
+    transport = FakeTransport([approval, MuseTurnFinished("turn-1", "completed")])
+    executor = MuseExecutor(lambda: transport)
+
+    async def policy(*args: Any) -> Verdict:
+        return Verdict("POLICY_ACTION_ASK")
+
+    executor._policy_evaluator = policy
+    await collect(executor)
+    assert transport.decisions == [("session-1", "approval-1", "only")]
+
+
 def test_declares_first_class_agent_loop_capabilities() -> None:
     executor = MuseExecutor(lambda: FakeTransport())
     assert executor.supports_streaming()
