@@ -16,10 +16,9 @@ their turn through `item/started`; deltas for unknown items are dropped. Usage,
 approvals, and terminal events require a matching `turnId`. This live stream does
 not replay or seed a snapshot for consumers attaching after a turn has begun.
 
-> **Status.** The harness is *discoverable* (id, alias `muse-code`, label, install
-> spec, capabilities, catalog row, importable `create_app()`), and the MSP transport
-> is implemented and hermetically tested — but the executor's `run_turn` is still a
-> stub. Wiring it to the transport is the next step.
+> **Status.** The harness is discoverable and runnable. Its executor translates Muse
+> streaming output, reasoning, approvals, usage, cancellation, and failures into
+> Omnigent events through the vendored MSP transport.
 
 ## Install (local dev)
 

@@ -117,6 +117,8 @@ class MspTurnCompleted:
     error_kind: str | None = None
     error_message: str | None = None
     error_retryable: bool | None = None
+    terminal: str | None = None
+    reason: str | None = None
 
 
 @dataclass
@@ -128,7 +130,21 @@ class MspApprovalRequested:
     raw: JsonObject = field(default_factory=dict)
 
 
-MspEvent = MspTextDelta | MspTokenUsage | MspTurnCompleted | MspApprovalRequested
+@dataclass
+class MspItemUpdate:
+    """A full transcript item from a lifecycle notification."""
+
+    phase: str
+    item: JsonObject
+
+
+MspEvent = (
+    MspTextDelta
+    | MspTokenUsage
+    | MspTurnCompleted
+    | MspApprovalRequested
+    | MspItemUpdate
+)
 
 
 def mint_command_id() -> str:
@@ -849,6 +865,11 @@ class MspClient:
     ) -> MspEvent | None:
         if params.get("sessionId") != session_id or params.get("turnId") != turn_id:
             return None
+        if method in {"item/started", "item/updated", "item/completed"}:
+            item = params.get("item")
+            if not isinstance(item, dict):
+                return None
+            return MspItemUpdate(method.removeprefix("item/"), dict(item))
         if method == "item/delta":
             delta = params.get("delta")
             if not isinstance(delta, str) or not delta:
@@ -890,6 +911,12 @@ class MspClient:
                 if isinstance(error.get("message"), str)
                 else None,
                 error_retryable=retryable if isinstance(retryable, bool) else None,
+                terminal=params.get("terminal")
+                if isinstance(params.get("terminal"), str)
+                else None,
+                reason=params.get("reason")
+                if isinstance(params.get("reason"), str)
+                else None,
             )
         if method == "turn/retracted":
             return MspTurnCompleted(
@@ -964,7 +991,7 @@ class MspClient:
         session_id: str,
         approval_id: str,
         choice_id: str,
-        requirement_id: str,
+        requirement_id: JsonObject,
         *,
         feedback: str | None = None,
         timeout: float = _DEFAULT_REQUEST_TIMEOUT,
@@ -1051,17 +1078,23 @@ class TurnStream:
     def _tap(self, method: str, params: JsonObject) -> None:
         if params.get("sessionId") != self._session_id:
             return
-        if method in {"item/started", "item/completed"}:
+        if method in {"item/started", "item/updated", "item/completed"}:
             item = params.get("item")
-            if isinstance(item, dict):
-                item_id = item.get("itemId")
-                turn_id = item.get("turnId")
-                if isinstance(item_id, str):
-                    if method == "item/completed":
-                        self._item_turns.pop(item_id, None)
-                    elif isinstance(turn_id, str):
-                        self._item_turns[item_id] = turn_id
-            return
+            if not isinstance(item, dict):
+                return
+            item_id = item.get("itemId")
+            turn_id = item.get("turnId")
+            if not isinstance(turn_id, str) and isinstance(item_id, str):
+                turn_id = self._item_turns.get(item_id)
+            if not isinstance(turn_id, str):
+                return
+            if isinstance(item_id, str):
+                if method == "item/completed":
+                    self._item_turns.pop(item_id, None)
+                else:
+                    self._item_turns[item_id] = turn_id
+            # Correlate this stream's copy without changing raw subscribers.
+            params = {**params, "turnId": turn_id}
         if method == "item/delta":
             item_id = params.get("itemId")
             turn_id = params.get("turnId")

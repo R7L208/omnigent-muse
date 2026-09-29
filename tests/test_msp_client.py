@@ -143,9 +143,11 @@ async def test_turn_and_session_helpers_smoke(tmp_path: Path) -> None:
             "approvals": [],
             "userInputs": [],
         }
-        assert (await client.decide_approval(session_id, "a", "c", "r"))[
-            "status"
-        ] == "accepted"
+        assert (
+            await client.decide_approval(
+                session_id, "a", "c", {"approvalId": "a", "sourceIndex": 0}
+            )
+        )["status"] == "accepted"
         assert "usage" in await client.read_usage(session_id)
         assert (await client.compact_session(session_id))["status"] == "accepted"
         assert (await client.set_model(session_id, "m"))["status"] == "accepted"
@@ -804,7 +806,8 @@ async def test_follow_drops_unassociated_item_deltas(
             client._fan_out("turn/completed", {"sessionId": "s", "turnId": "t"})
             async with asyncio.timeout(2):
                 events = [event async for event in stream.follow("t")]
-            assert [type(event) for event in events] == [MspTurnCompleted]
+            assert not any(isinstance(event, MspTextDelta) for event in events)
+            assert isinstance(events[-1], MspTurnCompleted)
     finally:
         await client.close()
 

@@ -232,6 +232,43 @@ def main() -> int:
             _send(
                 {
                     "jsonrpc": "2.0",
+                    "method": "item/started",
+                    "params": {
+                        "sessionId": session_id,
+                        "item": {
+                            "itemId": "tool-item-1",
+                            "turnId": command_id,
+                            "callId": "call-1",
+                            "kind": "toolCall",
+                            "status": "inProgress",
+                            "tool": "shell",
+                            "args": {"command": "pwd"},
+                        },
+                    },
+                }
+            )
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "sessionId": session_id,
+                        "item": {
+                            "itemId": "tool-item-1",
+                            "turnId": command_id,
+                            "callId": "call-1",
+                            "kind": "toolCall",
+                            "status": "completed",
+                            "tool": "shell",
+                            "args": {"command": "pwd"},
+                            "visibleOutput": "/workspace",
+                        },
+                    },
+                }
+            )
+            _send(
+                {
+                    "jsonrpc": "2.0",
                     "method": "session/tokenUsage",
                     "params": {
                         "sessionId": session_id,

@@ -16,19 +16,16 @@ from fastapi import FastAPI
 from omnigent.inner.executor import Executor
 from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
-from .muse_executor import MuseExecutor, MuseTransport
+from .msp_transport import MspTransport
+from .muse_executor import MuseExecutor
 
 _ENV_MODEL = "HARNESS_MUSE_MODEL"
 _ENV_CWD = "HARNESS_MUSE_CWD"
 
 
-def _unwired_transport() -> MuseTransport:
-    raise RuntimeError("Muse MSP transport is not installed in this build")
-
-
 def _build_muse_executor() -> Executor:
     return MuseExecutor(
-        _unwired_transport,
+        MspTransport,
         model=os.environ.get(_ENV_MODEL) or None,
         cwd=os.environ.get(_ENV_CWD)
         or os.environ.get("OMNIGENT_RUNNER_WORKSPACE")
