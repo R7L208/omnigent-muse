@@ -485,6 +485,18 @@ class MuseExecutor(Executor):
                 preserve_session=True,
             )
             return
+        effort = self._reasoning_effort
+        if config is not None:
+            override = config.extra.get("reasoning_effort")
+            if override is not None and override not in REASONING_EFFORTS:
+                yield ExecutorError(
+                    "Muse reasoning_effort must be one of "
+                    f"{', '.join(sorted(REASONING_EFFORTS))}; got {override!r}",
+                    preserve_session=True,
+                )
+                return
+            if isinstance(override, str) and override:
+                effort = override
         latest_user_index = self._latest_user_index(messages)
         replay = self._needs_replay or (
             self._session_id is None
@@ -512,19 +524,6 @@ class MuseExecutor(Executor):
             text = self._latest_user_text(messages)
         if not replay and not self._system_prompt_sent and system_prompt:
             text = f"{system_prompt}\n\n{text}" if text else system_prompt
-        effort = self._reasoning_effort
-        if config is not None:
-            override = config.extra.get("reasoning_effort")
-            if override is not None and override not in REASONING_EFFORTS:
-                yield ExecutorError(
-                    "Muse reasoning_effort must be one of "
-                    f"{', '.join(sorted(REASONING_EFFORTS))}; got {override!r}",
-                    preserve_session=True,
-                )
-                return
-            if isinstance(override, str) and override:
-                effort = override
-
         accumulated: list[str] = []
         self._tool_calls.clear()
         try:

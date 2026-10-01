@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
+from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+from omnigent.inner.executor import TurnComplete
 
 from omnigent.community.harness.muse.inner.runtime_config import (
     DEFAULT_APPROVAL_MODE,
@@ -133,3 +136,64 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
     assert executor._reasoning_effort == "medium"
     assert transport._idle_timeout == 17
     assert transport._env_passthrough == ("OPTED_IN",)
+
+
+async def test_declarative_config_reaches_real_msp_session_and_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.community.harness.muse.inner.msp_client import MspClient
+    from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
+    from omnigent.community.harness.muse.inner.muse_harness import (
+        _build_muse_executor,
+    )
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    log_path = tmp_path / "msp.jsonl"
+    monkeypatch.setenv("FAKE_MSP_LOG", str(log_path))
+    spec = SimpleNamespace(
+        executor=SimpleNamespace(
+            model="configured-model",
+            reasoning_effort="high",
+            config={
+                "approval_mode": "always",
+                "turn_idle_timeout": 19,
+                "env_passthrough": ["FAKE_MSP_LOG"],
+            },
+        ),
+        model=None,
+        os_env=None,
+    )
+    for name, value in build_spawn_env(spec, cwd=tmp_path).items():
+        monkeypatch.setenv(name, value)
+
+    real_spawn = MspClient.spawn
+    fake_host = Path(__file__).parent / "fixtures" / "fake_msp_host.py"
+
+    async def spawn_fake_host(_argv: object, **kwargs: Any) -> MspClient:
+        return await real_spawn([sys.executable, str(fake_host)], **kwargs)
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(spawn_fake_host))
+    executor = cast(MuseExecutor, _build_muse_executor())
+    try:
+        events = [
+            event
+            async for event in executor.run_turn(
+                messages=[{"role": "user", "content": "hello"}],
+                tools=[],
+                system_prompt="Be concise.",
+            )
+        ]
+    finally:
+        await executor.close()
+
+    frames = [json.loads(line) for line in log_path.read_text().splitlines()]
+    session = next(frame for frame in frames if frame.get("method") == "session/start")
+    turn = next(frame for frame in frames if frame.get("method") == "turn/start")
+    assert session["params"]["workspaceRoot"] == str(tmp_path)
+    assert session["params"]["approvalMode"] == "always"
+    assert session["params"]["modelId"] == "configured-model"
+    assert turn["params"]["reasoningEffort"] == "high"
+    assert turn["params"]["input"] == [
+        {"type": "text", "text": "Be concise.\n\nhello"}
+    ]
+    assert any(isinstance(event, TurnComplete) for event in events)

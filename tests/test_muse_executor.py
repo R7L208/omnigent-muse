@@ -196,6 +196,24 @@ async def test_rejects_conflicting_per_turn_model_before_sending_prompt() -> Non
     assert transport.turns == []
 
 
+async def test_rejects_invalid_per_turn_reasoning_effort_before_sending_prompt() -> (
+    None
+):
+    transport = FakeTransport()
+    events = await collect(
+        MuseExecutor(lambda: transport),
+        config=ExecutorConfig(extra={"reasoning_effort": "extreme"}),
+    )
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert "reasoning_effort" in error.message
+    assert "extreme" in error.message
+    assert error.preserve_session is True
+    assert transport.starts == []
+    assert transport.turns == []
+
+
 async def test_does_not_silently_apply_model_to_existing_default_session() -> None:
     transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
     executor = MuseExecutor(lambda: transport)
