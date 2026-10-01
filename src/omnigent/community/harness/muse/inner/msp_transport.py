@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
@@ -31,6 +32,7 @@ from .muse_executor import (
 )
 
 JsonObject = dict[str, Any]
+_DEFAULT_TURN_IDLE_TIMEOUT = 300.0
 
 # Keep the long-lived agent process isolated from credentials and runtime knobs
 # belonging to the harness. Additions should be limited to variables Muse needs
@@ -101,11 +103,15 @@ class MspTransport:
         executable: str | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
     ) -> None:
+        if idle_timeout <= 0:
+            raise ValueError("idle_timeout must be greater than zero")
         self._client = client
         self._executable = executable
         self._cwd = cwd
         self._env = env
+        self._idle_timeout = idle_timeout
         self._approval_requirements: dict[tuple[str, str], JsonObject] = {}
         self._item_kinds: dict[str, str] = {}
 
@@ -116,6 +122,7 @@ class MspTransport:
         executable: str | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
     ) -> MspTransport:
         binary = executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
         client = await MspClient.spawn(
@@ -125,7 +132,7 @@ class MspTransport:
             client_version=_package_version(),
             client_title="Omnigent Muse",
         )
-        return cls(client)
+        return cls(client, idle_timeout=idle_timeout)
 
     async def _get_client(self) -> MspClient:
         if self._client is None:
@@ -182,7 +189,19 @@ class MspTransport:
                     raise self._error(exc, preserve_session=True) from exc
                 yield MuseTurnStarted(turn_id)
                 latest_usage: JsonObject = {}
-                async for event in stream.follow(turn_id):
+                events = stream.follow(turn_id)
+                while True:
+                    try:
+                        async with asyncio.timeout(self._idle_timeout):
+                            event = await anext(events)
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError as exc:
+                        raise MuseTransportError(
+                            f"Muse turn produced no events for "
+                            f"{self._idle_timeout:g}s",
+                            retryable=True,
+                        ) from exc
                     if isinstance(event, MspTextDelta):
                         kind = self._item_kinds.get(event.item_id)
                         if kind == "reasoning" or (

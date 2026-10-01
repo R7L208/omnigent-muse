@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -53,6 +54,13 @@ class _ScriptedStream:
             yield event
 
 
+class _SilentStream(_ScriptedStream):
+    async def follow(self, turn_id: str) -> AsyncIterator[object]:
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover - make this an async generator
+            yield None
+
+
 class _ScriptedClient:
     def __init__(self, events: list[object] | None = None) -> None:
         self.events = events or []
@@ -79,6 +87,11 @@ class _ScriptedClient:
         if self.approval_error is not None:
             error, self.approval_error = self.approval_error, None
             raise error
+
+
+class _SilentClient(_ScriptedClient):
+    def open_stream(self, session_id: str) -> _SilentStream:
+        return _SilentStream([])
 
 
 def _scripted_transport(events: list[object]) -> MspTransport:
@@ -364,6 +377,27 @@ async def test_rejected_turn_start_preserves_healthy_session() -> None:
 
     assert caught.value.retryable is True
     assert caught.value.preserve_session is True
+
+
+async def test_silent_turn_times_out_without_preserving_session() -> None:
+    transport = MspTransport(cast(Any, _SilentClient()), idle_timeout=0.01)
+
+    with pytest.raises(MuseTransportError, match="no events for 0.01s") as caught:
+        _ = [
+            event
+            async for event in transport.run_turn(
+                "s", text="hello", reasoning_effort=None
+            )
+        ]
+
+    assert caught.value.retryable is True
+    assert caught.value.preserve_session is False
+
+
+@pytest.mark.parametrize("idle_timeout", [0, -1])
+def test_idle_timeout_must_be_positive(idle_timeout: float) -> None:
+    with pytest.raises(ValueError, match="greater than zero"):
+        MspTransport(idle_timeout=idle_timeout)
 
 
 async def test_approval_requirement_is_preserved_after_failed_decision() -> None:
