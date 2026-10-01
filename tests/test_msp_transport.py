@@ -62,7 +62,9 @@ class _SilentStream(_ScriptedStream):
 
 
 class _DelayedStream(_ScriptedStream):
-    def __init__(self, events: list[tuple[float, object]], *, stall: bool = False) -> None:
+    def __init__(
+        self, events: list[tuple[float, object]], *, stall: bool = False
+    ) -> None:
         super().__init__([])
         self.delayed_events = events
         self.stall = stall
@@ -158,6 +160,12 @@ def test_spawn_environment_is_deny_by_default() -> None:
             "HOME": "/home/muse",
             "PATH": "/usr/bin",
             "HTTPS_PROXY": "http://proxy.test",
+            "ALL_PROXY": "socks5://proxy.test",
+            "NODE_EXTRA_CA_CERTS": "/certs/corporate.pem",
+            "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+            "OMNIGENT": "session-1",
+            "SYSTEMROOT": "C:\\Windows",
+            "USERPROFILE": "C:\\Users\\muse",
             "XDG_CONFIG_HOME": "/config",
             "AWS_SECRET_ACCESS_KEY": "secret",
             "OPENAI_API_KEY": "secret",
@@ -170,6 +178,12 @@ def test_spawn_environment_is_deny_by_default() -> None:
         "HOME": "/home/muse",
         "PATH": "/usr/bin",
         "HTTPS_PROXY": "http://proxy.test",
+        "ALL_PROXY": "socks5://proxy.test",
+        "NODE_EXTRA_CA_CERTS": "/certs/corporate.pem",
+        "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+        "OMNIGENT": "session-1",
+        "SYSTEMROOT": "C:\\Windows",
+        "USERPROFILE": "C:\\Users\\muse",
         "XDG_CONFIG_HOME": "/config",
     }
 
@@ -488,9 +502,7 @@ async def test_turn_idle_timeout_resets_after_each_event() -> None:
 
     events = [
         event
-        async for event in transport.run_turn(
-            "s", text="hello", reasoning_effort=None
-        )
+        async for event in transport.run_turn("s", text="hello", reasoning_effort=None)
     ]
 
     assert [event.text for event in events if isinstance(event, MuseTextDelta)] == [

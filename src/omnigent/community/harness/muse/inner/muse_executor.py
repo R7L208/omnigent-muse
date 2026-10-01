@@ -245,6 +245,18 @@ class MuseExecutor(Executor):
         return ""
 
     @staticmethod
+    def _latest_user_index(messages: list[Message]) -> int | None:
+        return next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[index], dict)
+                and messages[index].get("role") == "user"
+            ),
+            None,
+        )
+
+    @staticmethod
     def _unsupported_content_types(
         messages: list[Message], *, replay: bool
     ) -> tuple[str, ...]:
@@ -276,9 +288,7 @@ class MuseExecutor(Executor):
         return tuple(sorted(unsupported))
 
     @classmethod
-    def _conversation_replay(
-        cls, messages: list[Message], system_prompt: str
-    ) -> str:
+    def _conversation_replay(cls, messages: list[Message], system_prompt: str) -> str:
         transcript: list[JsonObject] = []
         for message in messages:
             if not isinstance(message, dict):
@@ -425,7 +435,12 @@ class MuseExecutor(Executor):
             if already_seen:
                 return None
             return ToolCallRequest(
-                event.name, arguments, metadata={"call_id": event.call_id}
+                event.name,
+                arguments,
+                metadata={
+                    "call_id": event.call_id,
+                    "internally_executed": True,
+                },
             )
         cached_name, _ = self._tool_calls.pop(
             event.call_id, (event.name or "tool", arguments)
@@ -468,9 +483,13 @@ class MuseExecutor(Executor):
                 preserve_session=True,
             )
             return
-        unsupported = self._unsupported_content_types(
-            messages, replay=self._needs_replay
+        latest_user_index = self._latest_user_index(messages)
+        replay = self._needs_replay or (
+            self._session_id is None
+            and latest_user_index is not None
+            and latest_user_index > 0
         )
+        unsupported = self._unsupported_content_types(messages, replay=replay)
         if unsupported:
             yield ExecutorError(
                 "Muse attachment forwarding is not implemented; unsupported "
@@ -485,11 +504,11 @@ class MuseExecutor(Executor):
             yield ExecutorError(f"Muse startup failed: {describe_exception(exc)}")
             return
 
-        if self._needs_replay:
+        if replay:
             text = self._conversation_replay(messages, system_prompt)
         else:
             text = self._latest_user_text(messages)
-        if not self._needs_replay and not self._system_prompt_sent and system_prompt:
+        if not replay and not self._system_prompt_sent and system_prompt:
             text = f"{system_prompt}\n\n{text}" if text else system_prompt
         effort = self._reasoning_effort
         if config is not None:
@@ -568,6 +587,11 @@ class MuseExecutor(Executor):
             return await self._transport.interrupt_turn(
                 self._session_id, self._active_turn_id
             )
+        except MuseTransportError as exc:
+            if exc.transport_dead:
+                await self._discard_transport()
+            logger.debug("Muse interrupt failed: %s", exc)
+            return False
         except Exception as exc:  # noqa: BLE001 - interruption is best effort
             logger.debug("Muse interrupt failed: %s", exc)
             return False

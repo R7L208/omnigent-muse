@@ -109,7 +109,11 @@ async def test_translates_streaming_text_reasoning_tools_and_usage() -> None:
     assert events == [
         TextChunk("Hello "),
         ReasoningChunk("checking", "reasoning_text"),
-        ToolCallRequest("shell", {"command": "pwd"}, metadata={"call_id": "call-1"}),
+        ToolCallRequest(
+            "shell",
+            {"command": "pwd"},
+            metadata={"call_id": "call-1", "internally_executed": True},
+        ),
         ToolCallComplete(
             "shell",
             ToolCallStatus.SUCCESS,
@@ -402,6 +406,43 @@ async def test_interrupt_delegates_for_live_turn() -> None:
     await task
 
 
+async def test_dead_transport_during_interrupt_clears_stale_session() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class DeadInterruptTransport(FakeTransport):
+        async def run_turn(
+            self,
+            session_id: str,
+            *,
+            text: str,
+            reasoning_effort: str | None,
+        ) -> AsyncIterator[MuseEvent]:
+            yield MuseTurnStarted("turn-live")
+            started.set()
+            await release.wait()
+            raise MuseTransportError("host exited", retryable=True, transport_dead=True)
+
+        async def interrupt_turn(self, session_id: str, turn_id: str | None) -> bool:
+            raise MuseTransportError("host exited", retryable=True, transport_dead=True)
+
+    transport = DeadInterruptTransport()
+    executor = MuseExecutor(lambda: transport)
+    task = asyncio.create_task(collect(executor))
+    await started.wait()
+
+    interrupted = await executor.interrupt_session("ignored")
+    try:
+        assert interrupted is False
+        assert transport.closed is True
+        assert executor._transport is None
+        assert executor._session_id is None
+        assert executor._needs_replay is True
+    finally:
+        release.set()
+        await task
+
+
 class FailFirstTurnTransport(FakeTransport):
     """Raises on the first run_turn (host dies mid-turn), succeeds afterward."""
 
@@ -495,6 +536,22 @@ async def test_dead_transport_is_replaced_on_next_turn() -> None:
     ]
 
 
+async def test_fresh_executor_replays_history_after_adapter_replacement() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    executor = MuseExecutor(lambda: transport)
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "retry after replacement"},
+    ]
+
+    await collect(executor, messages=messages)
+
+    replay = transport.turns[0]["text"]
+    assert "session restarted after its transport was lost" in replay
+    assert json.loads(replay.rsplit("\n\n", 1)[-1]) == messages
+
+
 async def test_partial_output_before_transport_death_replays_on_next_retry() -> None:
     dead = FakeTransport(
         [
@@ -520,9 +577,9 @@ async def test_partial_output_before_transport_death_replays_on_next_retry() -> 
             {"role": "user", "content": "retry this turn"},
         ],
     )
-    assert "session restarted after its transport was lost" in replacement.turns[0][
-        "text"
-    ]
+    assert (
+        "session restarted after its transport was lost" in replacement.turns[0]["text"]
+    )
 
 
 async def test_recovery_rejects_attachments_anywhere_in_replayed_history() -> None:
@@ -614,6 +671,10 @@ async def test_tool_call_request_emitted_once_across_started_and_in_progress() -
     requests = [event for event in events if isinstance(event, ToolCallRequest)]
     completes = [event for event in events if isinstance(event, ToolCallComplete)]
     assert len(requests) == 1
+    assert requests[0].metadata == {
+        "call_id": "call-1",
+        "internally_executed": True,
+    }
     assert len(completes) == 1
     assert completes[0].status is ToolCallStatus.SUCCESS
 

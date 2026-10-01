@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
+from omnigent.inner.agent_env import clean_agent_env
+
 from .msp_client import (
     MspApprovalRequested,
     MspClient,
@@ -36,48 +38,10 @@ JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
 logger = logging.getLogger(__name__)
 
-# Keep the long-lived agent process isolated from credentials and runtime knobs
-# belonging to the harness. Additions should be limited to variables Muse needs
-# to locate user state, execute tools, or establish its network connection.
-_SPAWN_ENV_ALLOWLIST = frozenset(
-    {
-        "COLORTERM",
-        "FORCE_COLOR",
-        "HOME",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "LANG",
-        "LANGUAGE",
-        "LC_ALL",
-        "LC_CTYPE",
-        "LOGNAME",
-        "NO_COLOR",
-        "NO_PROXY",
-        "PATH",
-        "SHELL",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "TEMP",
-        "TERM",
-        "TMP",
-        "TMPDIR",
-        "USER",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_RUNTIME_DIR",
-        "XDG_STATE_HOME",
-        "https_proxy",
-        "http_proxy",
-        "no_proxy",
-    }
-)
-
 
 def _spawn_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return the deny-by-default environment supplied to ``muse serve``."""
-    values = os.environ if source is None else source
-    return {name: values[name] for name in _SPAWN_ENV_ALLOWLIST if name in values}
+    return clean_agent_env(source=source)
 
 
 def _package_version() -> str:
@@ -206,8 +170,7 @@ class MspTransport:
                         break
                     except TimeoutError as exc:
                         raise MuseTransportError(
-                            f"Muse turn produced no events for "
-                            f"{self._idle_timeout:g}s",
+                            f"Muse turn produced no events for {self._idle_timeout:g}s",
                             retryable=True,
                         ) from exc
                     if isinstance(event, MspTextDelta):
@@ -235,13 +198,16 @@ class MspTransport:
                     elif isinstance(event, MspApprovalRequested):
                         yield self._approval(event)
                     elif isinstance(event, MspTurnCompleted):
-                        usage = self._usage(
-                            prompt_tokens=event.usage.get("promptTokens"),
-                            output_tokens=event.usage.get("outputTokens"),
-                            total_tokens=event.usage.get("totalTokens"),
-                            cached_tokens=event.usage.get("cachedTokens"),
-                            reasoning_tokens=event.usage.get("reasoningTokens"),
-                        ) or latest_usage
+                        usage = (
+                            self._usage(
+                                prompt_tokens=event.usage.get("promptTokens"),
+                                output_tokens=event.usage.get("outputTokens"),
+                                total_tokens=event.usage.get("totalTokens"),
+                                cached_tokens=event.usage.get("cachedTokens"),
+                                reasoning_tokens=event.usage.get("reasoningTokens"),
+                            )
+                            or latest_usage
+                        )
                         state = event.terminal or "completed"
                         if state in {"canceled", "retracted"}:
                             state = "cancelled"
