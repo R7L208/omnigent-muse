@@ -339,6 +339,15 @@ async def test_transport_failure_becomes_executor_error() -> None:
     ]
 
 
+async def test_stream_without_terminal_event_requires_session_teardown() -> None:
+    transport = FakeTransport([MuseTextDelta("partial")])
+
+    assert await collect(MuseExecutor(lambda: transport)) == [
+        TextChunk("partial"),
+        ExecutorError("Muse stream ended without a terminal turn event"),
+    ]
+
+
 async def test_idle_transport_failure_preserves_session() -> None:
     transport = FakeTransport(
         [MuseTransportError("turn rejected", preserve_session=True)]
@@ -486,6 +495,36 @@ async def test_dead_transport_is_replaced_on_next_turn() -> None:
     ]
 
 
+async def test_partial_output_before_transport_death_replays_on_next_retry() -> None:
+    dead = FakeTransport(
+        [
+            MuseTextDelta("partial answer"),
+            MuseTransportError("host exited", retryable=True, transport_dead=True),
+        ]
+    )
+    replacement = FakeTransport([MuseTurnFinished("turn-2", "completed")])
+    transports = iter((dead, replacement))
+    executor = MuseExecutor(lambda: next(transports))
+
+    assert await collect(executor) == [
+        TextChunk("partial answer"),
+        ExecutorError("Muse transport error: host exited", retryable=True),
+    ]
+    assert replacement.starts == []
+
+    await collect(
+        executor,
+        messages=[
+            {"role": "user", "content": "original question"},
+            {"role": "assistant", "content": "confirmed prior answer"},
+            {"role": "user", "content": "retry this turn"},
+        ],
+    )
+    assert "session restarted after its transport was lost" in replacement.turns[0][
+        "text"
+    ]
+
+
 async def test_recovery_rejects_attachments_anywhere_in_replayed_history() -> None:
     dead = FakeTransport(
         [MuseTransportError("host exited", retryable=True, transport_dead=True)]
@@ -515,6 +554,50 @@ async def test_recovery_rejects_attachments_anywhere_in_replayed_history() -> No
         )
     ]
     assert replacement.starts == []
+
+
+@pytest.mark.parametrize(
+    ("content", "kind"),
+    [
+        ([{"type": "input_text"}], "malformed_text"),
+        ([{"type": "custom_blob", "value": "data"}], "custom_blob"),
+        (["untyped block"], "unknown"),
+    ],
+)
+async def test_rejects_malformed_and_unknown_content_blocks(
+    content: list[object], kind: str
+) -> None:
+    transport = FakeTransport()
+
+    [error] = await collect(
+        MuseExecutor(lambda: transport),
+        messages=[{"role": "user", "content": content}],
+    )
+
+    assert isinstance(error, ExecutorError)
+    assert f"content types: {kind}" in error.message
+    assert transport.starts == []
+
+
+async def test_healthy_session_ignores_attachments_in_prior_history() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    executor = MuseExecutor(lambda: transport)
+    await collect(executor)
+
+    events = await collect(
+        executor,
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "input_image", "image_url": "already-seen"}],
+            },
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": "follow-up"},
+        ],
+    )
+
+    assert isinstance(events[-1], TurnComplete)
+    assert transport.turns[-1]["text"] == "follow-up"
 
 
 async def test_tool_call_request_emitted_once_across_started_and_in_progress() -> None:

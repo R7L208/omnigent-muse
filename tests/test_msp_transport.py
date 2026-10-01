@@ -61,12 +61,27 @@ class _SilentStream(_ScriptedStream):
             yield None
 
 
+class _DelayedStream(_ScriptedStream):
+    def __init__(self, events: list[tuple[float, object]], *, stall: bool = False) -> None:
+        super().__init__([])
+        self.delayed_events = events
+        self.stall = stall
+
+    async def follow(self, turn_id: str) -> AsyncIterator[object]:
+        for delay, event in self.delayed_events:
+            await asyncio.sleep(delay)
+            yield event
+        if self.stall:
+            await asyncio.Event().wait()
+
+
 class _ScriptedClient:
     def __init__(self, events: list[object] | None = None) -> None:
         self.events = events or []
         self.approval_calls: list[dict[str, Any]] = []
         self.approval_error: Exception | None = None
         self.turn_error: Exception | None = None
+        self.interrupt_error: Exception | None = None
         self.closed = False
 
     def open_stream(self, session_id: str) -> _ScriptedStream:
@@ -92,10 +107,30 @@ class _ScriptedClient:
     async def close(self) -> None:
         self.closed = True
 
+    async def interrupt_turn(self, *args: object, **kwargs: object) -> dict[str, str]:
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+        return {"status": "accepted"}
+
 
 class _SilentClient(_ScriptedClient):
     def open_stream(self, session_id: str) -> _SilentStream:
         return _SilentStream([])
+
+
+class _DelayedClient(_ScriptedClient):
+    def __init__(self, stream: _DelayedStream) -> None:
+        super().__init__()
+        self.stream = stream
+
+    def open_stream(self, session_id: str) -> _DelayedStream:
+        return self.stream
+
+
+class _CloseFailClient(_ScriptedClient):
+    async def close(self) -> None:
+        self.closed = True
+        raise RuntimeError("close failed")
 
 
 def _scripted_transport(events: list[object]) -> MspTransport:
@@ -441,6 +476,43 @@ async def test_silent_turn_times_out_without_preserving_session() -> None:
     assert caught.value.preserve_session is False
 
 
+async def test_turn_idle_timeout_resets_after_each_event() -> None:
+    stream = _DelayedStream(
+        [
+            (0.01, MspTextDelta("one", "item-1")),
+            (0.01, MspTextDelta("two", "item-1")),
+            (0.01, MspTurnCompleted("s", "turn-1")),
+        ]
+    )
+    transport = MspTransport(cast(Any, _DelayedClient(stream)), idle_timeout=0.02)
+
+    events = [
+        event
+        async for event in transport.run_turn(
+            "s", text="hello", reasoning_effort=None
+        )
+    ]
+
+    assert [event.text for event in events if isinstance(event, MuseTextDelta)] == [
+        "one",
+        "two",
+    ]
+    assert isinstance(events[-1], MuseTurnFinished)
+
+
+async def test_turn_times_out_after_activity_stops() -> None:
+    stream = _DelayedStream([(0, MspTextDelta("started", "item-1"))], stall=True)
+    transport = MspTransport(cast(Any, _DelayedClient(stream)), idle_timeout=0.01)
+
+    with pytest.raises(MuseTransportError, match="no events for 0.01s"):
+        _ = [
+            event
+            async for event in transport.run_turn(
+                "s", text="hello", reasoning_effort=None
+            )
+        ]
+
+
 @pytest.mark.parametrize("idle_timeout", [0, -1])
 def test_idle_timeout_must_be_positive(idle_timeout: float) -> None:
     with pytest.raises(ValueError, match="greater than zero"):
@@ -466,3 +538,48 @@ async def test_approval_requirement_is_preserved_after_failed_decision() -> None
 
     assert client.approval_calls == [requirement_id, requirement_id]
     assert ("s", "approval-1") not in transport._approval_requirements
+
+
+async def test_dead_client_during_approval_is_discarded() -> None:
+    client = _ScriptedClient()
+    client.approval_error = MspConnectionClosed("approval connection lost")
+    transport = MspTransport(cast(Any, client))
+    transport._approval(MspApprovalRequested("s", "approval-1"))
+
+    with pytest.raises(MuseTransportError) as caught:
+        await transport.decide_approval("s", "approval-1", "allow")
+
+    assert caught.value.transport_dead is True
+    assert client.closed is True
+    assert transport._client is None
+    assert transport._approval_requirements == {}
+
+
+async def test_dead_client_during_interrupt_is_discarded() -> None:
+    client = _ScriptedClient()
+    client.interrupt_error = MspConnectionClosed("interrupt connection lost")
+    transport = MspTransport(cast(Any, client))
+
+    with pytest.raises(MuseTransportError) as caught:
+        await transport.interrupt_turn("s", "turn-1")
+
+    assert caught.value.transport_dead is True
+    assert client.closed is True
+    assert transport._client is None
+
+
+async def test_dead_client_cleanup_failure_preserves_connection_error() -> None:
+    client = _CloseFailClient([MspConnectionClosed("original connection error")])
+    transport = MspTransport(cast(Any, client))
+
+    with pytest.raises(MuseTransportError, match="original connection error") as caught:
+        _ = [
+            event
+            async for event in transport.run_turn(
+                "s", text="hello", reasoning_effort=None
+            )
+        ]
+
+    assert caught.value.transport_dead is True
+    assert client.closed is True
+    assert transport._client is None
