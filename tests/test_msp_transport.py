@@ -124,7 +124,7 @@ async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:
         )
         assert finished.state == "completed"
         assert finished.usage == {
-            "promptTokens": 10,
+            "inputTokens": 10,
             "outputTokens": 5,
             "totalTokens": 15,
         }
@@ -268,7 +268,7 @@ async def test_adapter_translates_terminal_states(
     finished = next(event for event in events if isinstance(event, MuseTurnFinished))
     assert finished.state == expected_state
     assert finished.error == expected_error
-    assert finished.usage == {"promptTokens": 3, "outputTokens": 2}
+    assert finished.usage == {"inputTokens": 3, "outputTokens": 2}
     assert finished.retryable is (completed.error_retryable is True)
 
 

@@ -152,11 +152,21 @@ class MspTransport:
                         if item_event is not None:
                             yield item_event
                     elif isinstance(event, MspTokenUsage):
-                        latest_usage = self._usage(event)
+                        latest_usage = self._usage(
+                            prompt_tokens=event.prompt_tokens,
+                            output_tokens=event.output_tokens,
+                            total_tokens=event.total_tokens,
+                        )
                     elif isinstance(event, MspApprovalRequested):
                         yield self._approval(event)
                     elif isinstance(event, MspTurnCompleted):
-                        usage = dict(event.usage) or latest_usage
+                        usage = self._usage(
+                            prompt_tokens=event.usage.get("promptTokens"),
+                            output_tokens=event.usage.get("outputTokens"),
+                            total_tokens=event.usage.get("totalTokens"),
+                            cached_tokens=event.usage.get("cachedTokens"),
+                            reasoning_tokens=event.usage.get("reasoningTokens"),
+                        ) or latest_usage
                         state = event.terminal or "completed"
                         if state in {"canceled", "retracted"}:
                             state = "cancelled"
@@ -302,14 +312,25 @@ class MspTransport:
         )
 
     @staticmethod
-    def _usage(event: MspTokenUsage) -> JsonObject:
+    def _usage(
+        *,
+        prompt_tokens: int | None,
+        output_tokens: int | None,
+        total_tokens: int | None,
+        cached_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+    ) -> JsonObject:
         usage: JsonObject = {}
-        if event.prompt_tokens is not None:
-            usage["promptTokens"] = event.prompt_tokens
-        if event.output_tokens is not None:
-            usage["outputTokens"] = event.output_tokens
-        if event.total_tokens is not None:
-            usage["totalTokens"] = event.total_tokens
+        if prompt_tokens is not None:
+            usage["inputTokens"] = prompt_tokens
+        if output_tokens is not None:
+            usage["outputTokens"] = output_tokens
+        if total_tokens is not None:
+            usage["totalTokens"] = total_tokens
+        if cached_tokens is not None:
+            usage["cachedTokens"] = cached_tokens
+        if reasoning_tokens is not None:
+            usage["reasoningTokens"] = reasoning_tokens
         return usage
 
     @staticmethod
