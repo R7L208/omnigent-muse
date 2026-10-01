@@ -73,6 +73,37 @@ def test_accepts_openai_minimal_reasoning_effort(
     assert load_runtime_config().reasoning_effort == "minimal"
 
 
+def test_active_sandbox_excludes_desktop_session_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os_env = OSEnvSpec(
+        sandbox=OSEnvSandboxSpec(
+            type="linux_bwrap",
+            env_passthrough=["GITHUB_TOKEN", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"],
+        )
+    )
+    monkeypatch.setenv(ENV_OS_ENV, json.dumps(dataclasses.asdict(os_env)))
+
+    assert load_runtime_config().env_passthrough == ("GITHUB_TOKEN",)
+
+
+def test_unsandboxed_environment_allows_explicit_desktop_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os_env = OSEnvSpec(
+        sandbox=OSEnvSandboxSpec(
+            type="none",
+            env_passthrough=["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"],
+        )
+    )
+    monkeypatch.setenv(ENV_OS_ENV, json.dumps(dataclasses.asdict(os_env)))
+
+    assert load_runtime_config().env_passthrough == (
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [

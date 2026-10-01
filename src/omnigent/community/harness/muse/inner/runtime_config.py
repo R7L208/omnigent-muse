@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from omnigent.inner.agent_env import declared_passthrough
 from omnigent.inner.datamodel import OSEnvSpec
 from omnigent.inner.os_env_serialization import decode_sandbox_spec
 
@@ -100,7 +101,7 @@ def _os_env() -> OSEnvSpec | None:
 
 def _passthrough_names(os_env: OSEnvSpec | None) -> tuple[str, ...]:
     raw_names = os.environ.get(ENV_ENV_PASSTHROUGH, "").split(",")
-    sandbox_names = getattr(getattr(os_env, "sandbox", None), "env_passthrough", None) or ()
+    sandbox_names = declared_passthrough(os_env)
     names: list[str] = []
     for candidate in (*raw_names, *sandbox_names):
         name = candidate.strip()
