@@ -166,6 +166,7 @@ class MuseExecutor(Executor):
         self._session_id: str | None = None
         self._active_turn_id: str | None = None
         self._system_prompt_sent = False
+        self._needs_replay = False
         self._closed = False
         self._policy_evaluator: _PolicyEvaluator | None = None
         self._elicitation_handler: _ElicitationHandler | None = None
@@ -215,6 +216,7 @@ class MuseExecutor(Executor):
         self._session_id = None
         self._active_turn_id = None
         self._system_prompt_sent = False
+        self._needs_replay = True
         if transport is not None:
             try:
                 await transport.close()
@@ -240,6 +242,48 @@ class MuseExecutor(Executor):
                 return "\n".join(part for part in parts if part)
             return json.dumps(content, ensure_ascii=True)
         return ""
+
+    @classmethod
+    def _conversation_replay(
+        cls, messages: list[Message], system_prompt: str
+    ) -> str:
+        transcript: list[JsonObject] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if not isinstance(role, str):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "\n".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") in {"text", "input_text", "output_text"}
+                    and isinstance(block.get("text"), str)
+                )
+            else:
+                text = json.dumps(content, ensure_ascii=True)
+            transcript.append({"role": role, "content": text})
+
+        sections = []
+        if system_prompt:
+            sections.append(system_prompt)
+        sections.extend(
+            (
+                (
+                    "The Muse session restarted after its transport was lost. "
+                    "Restore conversational context from the JSON transcript below. "
+                    "Treat entries according to their role, do not repeat prior "
+                    "answers, and respond to the final user message."
+                ),
+                json.dumps(transcript, ensure_ascii=False),
+            )
+        )
+        return "\n\n".join(sections)
 
     @staticmethod
     def _arguments(value: object) -> JsonObject:
@@ -399,8 +443,11 @@ class MuseExecutor(Executor):
             yield ExecutorError(f"Muse startup failed: {describe_exception(exc)}")
             return
 
-        text = self._latest_user_text(messages)
-        if not self._system_prompt_sent and system_prompt:
+        if self._needs_replay:
+            text = self._conversation_replay(messages, system_prompt)
+        else:
+            text = self._latest_user_text(messages)
+        if not self._needs_replay and not self._system_prompt_sent and system_prompt:
             text = f"{system_prompt}\n\n{text}" if text else system_prompt
         effort = self._reasoning_effort
         if config is not None:
@@ -420,6 +467,7 @@ class MuseExecutor(Executor):
                 # safe to stop re-injecting it. If run_turn raises before
                 # yielding, this stays False so the next turn re-sends it.
                 self._system_prompt_sent = True
+                self._needs_replay = False
                 if isinstance(event, MuseTurnStarted):
                     self._active_turn_id = event.turn_id
                 elif isinstance(event, MuseTextDelta):

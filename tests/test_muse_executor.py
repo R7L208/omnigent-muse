@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -436,14 +437,26 @@ async def test_dead_transport_is_replaced_on_next_turn() -> None:
     assert isinstance(error, ExecutorError)
     assert dead.closed is True
 
-    [complete] = await collect(executor)
+    [complete] = await collect(
+        executor,
+        messages=[
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "follow-up"},
+        ],
+    )
     assert isinstance(complete, TurnComplete)
     assert replacement.starts == [
         {"workspace_root": None, "model": None, "approval_mode": "onRequest"}
     ]
-    assert replacement.turns[0]["text"] == (
-        "Follow the project instructions.\n\nhello"
-    )
+    replay = replacement.turns[0]["text"]
+    assert replay.startswith("Follow the project instructions.\n\n")
+    assert "session restarted after its transport was lost" in replay
+    assert json.loads(replay.rsplit("\n\n", 1)[-1]) == [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "follow-up"},
+    ]
 
 
 async def test_tool_call_request_emitted_once_across_started_and_in_progress() -> None:
