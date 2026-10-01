@@ -18,18 +18,25 @@ from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
 from .msp_transport import MspTransport
 from .muse_executor import MuseExecutor
+from .runtime_config import load_runtime_config
 
 _ENV_MODEL = "HARNESS_MUSE_MODEL"
 _ENV_CWD = "HARNESS_MUSE_CWD"
 
 
 def _build_muse_executor() -> Executor:
+    config = load_runtime_config()
     return MuseExecutor(
-        MspTransport,
+        lambda: MspTransport(
+            idle_timeout=config.turn_idle_timeout,
+            env_passthrough=config.env_passthrough,
+        ),
         model=os.environ.get(_ENV_MODEL) or None,
         cwd=os.environ.get(_ENV_CWD)
         or os.environ.get("OMNIGENT_RUNNER_WORKSPACE")
         or None,
+        approval_mode=config.approval_mode,
+        reasoning_effort=config.reasoning_effort,
     )
 
 

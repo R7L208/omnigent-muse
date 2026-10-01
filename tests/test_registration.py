@@ -9,6 +9,7 @@ package). It is skipped automatically if omnigent isn't importable.
 from __future__ import annotations
 
 import importlib.metadata
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -134,6 +135,38 @@ def test_build_spawn_env_returns_a_fresh_mapping():
     first["MUTATED"] = "yes"
 
     assert build_spawn_env(spec) == {"HARNESS_MUSE_MODEL": "muse-large"}
+
+
+def test_build_spawn_env_registers_all_runtime_options(monkeypatch):
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    monkeypatch.setenv("MUSE_TEST_TOKEN", "token-value")
+    spec = SimpleNamespace(
+        executor=SimpleNamespace(
+            model="muse-large",
+            reasoning_effort="high",
+            config={
+                "approval_mode": "always",
+                "turn_idle_timeout": 45,
+                "env_passthrough": ["MUSE_TEST_TOKEN"],
+            },
+        ),
+        model=None,
+        os_env=OSEnvSpec(sandbox=OSEnvSandboxSpec(type="none")),
+    )
+
+    env = build_spawn_env(spec, cwd=Path("/tmp/workspace"))
+
+    assert env["HARNESS_MUSE_MODEL"] == "muse-large"
+    assert env["HARNESS_MUSE_CWD"] == "/tmp/workspace"
+    assert env["HARNESS_MUSE_APPROVAL_MODE"] == "always"
+    assert env["HARNESS_MUSE_REASONING_EFFORT"] == "high"
+    assert env["HARNESS_MUSE_TURN_IDLE_TIMEOUT"] == "45"
+    assert json.loads(env["HARNESS_MUSE_OS_ENV"])["sandbox"]["type"] == "none"
+    assert env["HARNESS_MUSE_ENV_PASSTHROUGH"] == "MUSE_TEST_TOKEN"
+    assert env["MUSE_TEST_TOKEN"] == "token-value"
 
 
 @pytest.mark.skipif(

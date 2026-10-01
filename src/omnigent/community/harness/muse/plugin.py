@@ -7,8 +7,34 @@ no runtime modules (those import lazily inside ``create_app`` / ``build_spawn_en
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import os
+import re
+
 _HARNESS = "muse"
 _MODULE = "omnigent.community.harness.muse.inner.muse_harness"
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _set_unless_ambient(env: dict[str, str], name: str, value: object) -> None:
+    """Apply spec configuration without overriding process environment config."""
+    if name not in os.environ and value is not None:
+        env[name] = str(value)
+
+
+def _passthrough_names(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("executor.config.env_passthrough must be a list of names")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not _ENV_NAME.fullmatch(item):
+            raise ValueError(f"invalid environment-variable passthrough name: {item!r}")
+        if item not in names:
+            names.append(item)
+    return tuple(names)
 
 
 def get_contribution():
@@ -66,16 +92,36 @@ def get_contribution():
 def build_spawn_env(spec, *, cwd=None) -> dict[str, str]:
     """Build the env-var dict the muse harness wrap reads at startup.
 
-    Heavy imports (runtime/provider helpers) belong inside this function, not at
-    module top. TODO(step 2): resolve the model via omnigent's ``_resolve_spec_model``
-    and thread provider / reasoning-effort through. The skeleton passes model + cwd only.
+    Environment variables override declarative spec values. The harness process
+    validates the resulting values before it can spawn ``muse serve``.
     """
     env: dict[str, str] = {}
     model = getattr(getattr(spec, "executor", None), "model", None) or getattr(
         spec, "model", None
     )
-    if model:
-        env["HARNESS_MUSE_MODEL"] = str(model)
+    _set_unless_ambient(env, "HARNESS_MUSE_MODEL", model)
     if cwd is not None:
         env["HARNESS_MUSE_CWD"] = str(cwd)
+    executor = getattr(spec, "executor", None)
+    config = getattr(executor, "config", None)
+    config = config if isinstance(config, dict) else {}
+    _set_unless_ambient(env, "HARNESS_MUSE_APPROVAL_MODE", config.get("approval_mode"))
+    reasoning_effort = getattr(executor, "reasoning_effort", None)
+    _set_unless_ambient(env, "HARNESS_MUSE_REASONING_EFFORT", reasoning_effort)
+    _set_unless_ambient(
+        env, "HARNESS_MUSE_TURN_IDLE_TIMEOUT", config.get("turn_idle_timeout")
+    )
+
+    os_env = getattr(spec, "os_env", None)
+    if os_env is not None and "HARNESS_MUSE_OS_ENV" not in os.environ:
+        env["HARNESS_MUSE_OS_ENV"] = json.dumps(dataclasses.asdict(os_env))
+
+    names = _passthrough_names(config.get("env_passthrough"))
+    if names and "HARNESS_MUSE_ENV_PASSTHROUGH" not in os.environ:
+        env["HARNESS_MUSE_ENV_PASSTHROUGH"] = ",".join(names)
+    # The runner normally inherits these already. Copying explicitly makes the
+    # opt-in reliable for process managers that construct a narrow environment.
+    for name in names:
+        if name in os.environ:
+            env[name] = os.environ[name]
     return env

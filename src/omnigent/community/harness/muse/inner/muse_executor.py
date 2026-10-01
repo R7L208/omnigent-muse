@@ -30,6 +30,8 @@ from omnigent.inner.executor import (
     describe_exception,
 )
 
+from .runtime_config import REASONING_EFFORTS
+
 logger = logging.getLogger(__name__)
 
 type JsonObject = dict[str, Any]
@@ -513,6 +515,13 @@ class MuseExecutor(Executor):
         effort = self._reasoning_effort
         if config is not None:
             override = config.extra.get("reasoning_effort")
+            if override is not None and override not in REASONING_EFFORTS:
+                yield ExecutorError(
+                    "Muse reasoning_effort must be one of "
+                    f"{', '.join(sorted(REASONING_EFFORTS))}; got {override!r}",
+                    preserve_session=True,
+                )
+                return
             if isinstance(override, str) and override:
                 effort = override
 

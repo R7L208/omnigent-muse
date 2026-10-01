@@ -214,6 +214,26 @@ async def test_respawn_retains_explicit_process_configuration(monkeypatch) -> No
         assert kwargs["env"] == {"HOME": "/custom/home", "PATH": "/custom/bin"}
 
 
+async def test_respawn_retains_explicit_environment_passthrough(monkeypatch) -> None:
+    clients = iter((_ScriptedClient(), _ScriptedClient()))
+    calls: list[dict[str, object]] = []
+
+    async def fake_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        calls.append(kwargs)
+        return next(clients)
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(fake_spawn))
+    transport = await MspTransport.spawn(
+        env={"HOME": "/home/test", "OPTED_IN": "yes", "SECRET": "no"},
+        env_passthrough=("OPTED_IN",),
+    )
+    await transport._handle_error(MspConnectionClosed("lost"))
+    await transport._get_client()
+
+    assert calls[0]["env"] == {"HOME": "/home/test", "OPTED_IN": "yes"}
+    assert calls[1]["env"] == calls[0]["env"]
+
+
 async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:
     transport = await _transport(tmp_path)
     try:
