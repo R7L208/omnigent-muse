@@ -33,6 +33,7 @@ from omnigent.inner.executor import (
 logger = logging.getLogger(__name__)
 
 type JsonObject = dict[str, Any]
+_TEXT_CONTENT_TYPES = frozenset({"text", "input_text", "output_text"})
 
 
 @dataclass(frozen=True)
@@ -236,12 +237,43 @@ class MuseExecutor(Executor):
                     block.get("text", "")
                     for block in content
                     if isinstance(block, dict)
-                    and block.get("type") in {"text", "input_text"}
+                    and block.get("type") in _TEXT_CONTENT_TYPES
                     and isinstance(block.get("text"), str)
                 ]
                 return "\n".join(part for part in parts if part)
             return json.dumps(content, ensure_ascii=True)
         return ""
+
+    @staticmethod
+    def _unsupported_content_types(
+        messages: list[Message], *, replay: bool
+    ) -> tuple[str, ...]:
+        selected: list[Message] = messages
+        if not replay:
+            selected = []
+            for message in reversed(messages):
+                if isinstance(message, dict) and message.get("role") == "user":
+                    selected = [message]
+                    break
+
+        unsupported: set[str] = set()
+        for message in selected:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                continue
+            blocks = content if isinstance(content, list) else [content]
+            for block in blocks:
+                if not isinstance(block, dict):
+                    unsupported.add("unknown")
+                    continue
+                kind = block.get("type")
+                if kind not in _TEXT_CONTENT_TYPES:
+                    unsupported.add(kind if isinstance(kind, str) else "unknown")
+                elif not isinstance(block.get("text"), str):
+                    unsupported.add("malformed_text")
+        return tuple(sorted(unsupported))
 
     @classmethod
     def _conversation_replay(
@@ -262,7 +294,7 @@ class MuseExecutor(Executor):
                     block.get("text", "")
                     for block in content
                     if isinstance(block, dict)
-                    and block.get("type") in {"text", "input_text", "output_text"}
+                    and block.get("type") in _TEXT_CONTENT_TYPES
                     and isinstance(block.get("text"), str)
                 )
             else:
@@ -433,6 +465,16 @@ class MuseExecutor(Executor):
             yield ExecutorError(
                 f"Muse session uses model {self._model!r}; cannot apply per-turn "
                 f"model {requested_model!r} without restarting the session.",
+                preserve_session=True,
+            )
+            return
+        unsupported = self._unsupported_content_types(
+            messages, replay=self._needs_replay
+        )
+        if unsupported:
+            yield ExecutorError(
+                "Muse attachment forwarding is not implemented; unsupported "
+                f"content types: {', '.join(unsupported)}",
                 preserve_session=True,
             )
             return

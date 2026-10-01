@@ -204,6 +204,33 @@ async def test_does_not_silently_apply_model_to_existing_default_session() -> No
     assert error.preserve_session is True
 
 
+async def test_rejects_attachments_instead_of_silently_discarding_them() -> None:
+    transport = FakeTransport()
+    events = await collect(
+        MuseExecutor(lambda: transport),
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe this"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,..."},
+                    {"type": "file", "file_id": "file-1"},
+                ],
+            }
+        ],
+    )
+
+    assert events == [
+        ExecutorError(
+            "Muse attachment forwarding is not implemented; unsupported "
+            "content types: file, input_image",
+            preserve_session=True,
+        )
+    ]
+    assert transport.starts == []
+    assert transport.turns == []
+
+
 @dataclass
 class Verdict:
     action: str
@@ -457,6 +484,37 @@ async def test_dead_transport_is_replaced_on_next_turn() -> None:
         {"role": "assistant", "content": "first answer"},
         {"role": "user", "content": "follow-up"},
     ]
+
+
+async def test_recovery_rejects_attachments_anywhere_in_replayed_history() -> None:
+    dead = FakeTransport(
+        [MuseTransportError("host exited", retryable=True, transport_dead=True)]
+    )
+    replacement = FakeTransport()
+    transports = iter((dead, replacement))
+    executor = MuseExecutor(lambda: next(transports))
+    await collect(executor)
+
+    events = await collect(
+        executor,
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "input_image", "image_url": "image"}],
+            },
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": "follow-up"},
+        ],
+    )
+
+    assert events == [
+        ExecutorError(
+            "Muse attachment forwarding is not implemented; unsupported "
+            "content types: input_image",
+            preserve_session=True,
+        )
+    ]
+    assert replacement.starts == []
 
 
 async def test_tool_call_request_emitted_once_across_started_and_in_progress() -> None:
