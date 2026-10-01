@@ -139,6 +139,32 @@ def test_spawn_environment_is_deny_by_default() -> None:
     }
 
 
+async def test_respawn_retains_explicit_process_configuration(monkeypatch) -> None:
+    clients = iter((_ScriptedClient(), _ScriptedClient()))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    async def fake_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        calls.append((list(argv), kwargs))
+        return next(clients)
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(fake_spawn))
+    source_env = {"HOME": "/custom/home", "PATH": "/custom/bin", "SECRET": "x"}
+    transport = await MspTransport.spawn(
+        executable="/custom/muse",
+        cwd="/custom/workspace",
+        env=source_env,
+        idle_timeout=12,
+    )
+    await transport._handle_error(MspConnectionClosed("dead"))
+    await transport._get_client()
+
+    assert len(calls) == 2
+    for argv, kwargs in calls:
+        assert argv == ["/custom/muse", "serve"]
+        assert kwargs["cwd"] == "/custom/workspace"
+        assert kwargs["env"] == {"HOME": "/custom/home", "PATH": "/custom/bin"}
+
+
 async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:
     transport = await _transport(tmp_path)
     try:

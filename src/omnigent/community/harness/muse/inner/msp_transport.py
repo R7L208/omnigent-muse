@@ -134,7 +134,13 @@ class MspTransport:
             client_version=_package_version(),
             client_title="Omnigent Muse",
         )
-        return cls(client, idle_timeout=idle_timeout)
+        return cls(
+            client,
+            executable=executable,
+            cwd=cwd,
+            env=env,
+            idle_timeout=idle_timeout,
+        )
 
     async def _get_client(self) -> MspClient:
         if self._client is None:
