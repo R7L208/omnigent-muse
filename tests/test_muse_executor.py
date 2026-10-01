@@ -424,6 +424,28 @@ async def test_transport_closed_when_start_session_fails() -> None:
     assert transport.closed is True
 
 
+async def test_dead_transport_is_replaced_on_next_turn() -> None:
+    dead = FakeTransport(
+        [MuseTransportError("host exited", retryable=True, transport_dead=True)]
+    )
+    replacement = FakeTransport([MuseTurnFinished("turn-2", "completed")])
+    transports = iter((dead, replacement))
+    executor = MuseExecutor(lambda: next(transports))
+
+    [error] = await collect(executor)
+    assert isinstance(error, ExecutorError)
+    assert dead.closed is True
+
+    [complete] = await collect(executor)
+    assert isinstance(complete, TurnComplete)
+    assert replacement.starts == [
+        {"workspace_root": None, "model": None, "approval_mode": "onRequest"}
+    ]
+    assert replacement.turns[0]["text"] == (
+        "Follow the project instructions.\n\nhello"
+    )
+
+
 async def test_tool_call_request_emitted_once_across_started_and_in_progress() -> None:
     transport = FakeTransport(
         [

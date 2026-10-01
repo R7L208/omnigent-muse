@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
@@ -33,6 +34,7 @@ from .muse_executor import (
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
+logger = logging.getLogger(__name__)
 
 # Keep the long-lived agent process isolated from credentials and runtime knobs
 # belonging to the harness. Additions should be limited to variables Muse needs
@@ -165,7 +167,7 @@ class MspTransport:
                 raise MspProtocolError("session/start returned no session id")
             return session_id
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
-            raise self._error(exc) from exc
+            raise await self._handle_error(exc) from exc
 
     async def run_turn(
         self,
@@ -247,7 +249,7 @@ class MspTransport:
                             retryable=event.error_retryable is True,
                         )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
-            raise self._error(exc) from exc
+            raise await self._handle_error(exc) from exc
 
     async def decide_approval(
         self, session_id: str, approval_id: str, choice_id: str
@@ -263,7 +265,7 @@ class MspTransport:
                 session_id, approval_id, choice_id, requirement_id
             )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
-            raise self._error(exc) from exc
+            raise await self._handle_error(exc) from exc
         self._approval_requirements.pop(key, None)
 
     async def interrupt_turn(self, session_id: str, turn_id: str | None) -> bool:
@@ -271,13 +273,35 @@ class MspTransport:
             client = await self._get_client()
             result = await client.interrupt_turn(session_id, turn_id=turn_id)
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
-            raise self._error(exc) from exc
+            raise await self._handle_error(exc) from exc
         status = result.get("status")
         return status not in {"noop", "notRunning", "not_running", False}
 
     async def close(self) -> None:
-        if self._client is not None:
-            await self._client.close()
+        await self._discard_client()
+
+    async def _discard_client(self) -> None:
+        client, self._client = self._client, None
+        self._approval_requirements.clear()
+        self._item_kinds.clear()
+        if client is not None:
+            await client.close()
+
+    async def _handle_error(
+        self, exc: Exception, *, preserve_session: bool = False
+    ) -> MuseTransportError:
+        transport_dead = isinstance(exc, MspConnectionClosed)
+        if transport_dead:
+            try:
+                await self._discard_client()
+            except Exception:
+                # Preserve the connection failure that proved the transport dead.
+                logger.debug("Muse dead client cleanup failed", exc_info=True)
+        return self._error(
+            exc,
+            preserve_session=preserve_session,
+            transport_dead=transport_dead,
+        )
 
     def _approval(self, event: MspApprovalRequested) -> MuseApprovalRequested:
         raw = event.raw
@@ -402,11 +426,17 @@ class MspTransport:
 
     @staticmethod
     def _error(
-        exc: Exception, *, preserve_session: bool = False
+        exc: Exception,
+        *,
+        preserve_session: bool = False,
+        transport_dead: bool = False,
     ) -> MuseTransportError:
         retryable = isinstance(exc, MspConnectionClosed) or (
             isinstance(exc, MspError) and exc.retryable is True
         )
         return MuseTransportError(
-            str(exc), retryable=retryable, preserve_session=preserve_session
+            str(exc),
+            retryable=retryable,
+            preserve_session=preserve_session,
+            transport_dead=transport_dead,
         )

@@ -102,10 +102,12 @@ class MuseTransportError(Exception):
         *,
         retryable: bool = False,
         preserve_session: bool = False,
+        transport_dead: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.preserve_session = preserve_session
+        self.transport_dead = transport_dead
 
 
 class MuseTransport(Protocol):
@@ -207,6 +209,17 @@ class MuseExecutor(Executor):
         self._session_id = session_id
         self._model = model
         return session_id
+
+    async def _discard_transport(self) -> None:
+        transport, self._transport = self._transport, None
+        self._session_id = None
+        self._active_turn_id = None
+        self._system_prompt_sent = False
+        if transport is not None:
+            try:
+                await transport.close()
+            except Exception:
+                logger.debug("Muse dead transport cleanup failed", exc_info=True)
 
     @staticmethod
     def _latest_user_text(messages: list[Message]) -> str:
@@ -440,6 +453,8 @@ class MuseExecutor(Executor):
                     return
             yield ExecutorError("Muse stream ended without a terminal turn event")
         except MuseTransportError as exc:
+            if exc.transport_dead:
+                await self._discard_transport()
             yield ExecutorError(
                 f"Muse transport error: {describe_exception(exc)}",
                 retryable=exc.retryable,

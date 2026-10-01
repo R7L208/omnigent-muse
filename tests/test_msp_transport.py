@@ -67,6 +67,7 @@ class _ScriptedClient:
         self.approval_calls: list[dict[str, Any]] = []
         self.approval_error: Exception | None = None
         self.turn_error: Exception | None = None
+        self.closed = False
 
     def open_stream(self, session_id: str) -> _ScriptedStream:
         return _ScriptedStream(self.events)
@@ -87,6 +88,9 @@ class _ScriptedClient:
         if self.approval_error is not None:
             error, self.approval_error = self.approval_error, None
             raise error
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class _SilentClient(_ScriptedClient):
@@ -360,6 +364,23 @@ async def test_adapter_translates_stream_errors(
     assert str(caught.value) == str(error)
     assert caught.value.retryable is retryable
     assert caught.value.preserve_session is False
+    assert caught.value.transport_dead is isinstance(error, MspConnectionClosed)
+
+
+async def test_connection_closure_discards_dead_client() -> None:
+    client = _ScriptedClient([MspConnectionClosed("closed")])
+    transport = MspTransport(cast(Any, client))
+
+    with pytest.raises(MuseTransportError):
+        _ = [
+            event
+            async for event in transport.run_turn(
+                "s", text="hello", reasoning_effort=None
+            )
+        ]
+
+    assert client.closed is True
+    assert transport._client is None
 
 
 async def test_rejected_turn_start_preserves_healthy_session() -> None:
@@ -409,7 +430,9 @@ async def test_approval_requirement_is_preserved_after_failed_decision() -> None
             "s", "approval-1", raw={"currentRequirementId": requirement_id}
         )
     )
-    client.approval_error = MspConnectionClosed("temporary failure")
+    client.approval_error = MspError(
+        -32000, "temporary failure", data={"retryable": True}
+    )
 
     with pytest.raises(MuseTransportError):
         await transport.decide_approval("s", "approval-1", "allow")
