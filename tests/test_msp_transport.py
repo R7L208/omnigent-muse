@@ -22,7 +22,7 @@ from omnigent.community.harness.muse.inner.msp_client import (
     MspTokenUsage,
     MspTurnCompleted,
 )
-from omnigent.community.harness.muse.inner.msp_transport import MspTransport
+from omnigent.community.harness.muse.inner.msp_transport import MspTransport, _spawn_env
 from omnigent.community.harness.muse.inner.muse_executor import (
     MuseApprovalRequested,
     MuseReasoningDelta,
@@ -95,6 +95,28 @@ def _frames(tmp_path: Path, method: str) -> list[dict]:
         for line in (tmp_path / "fake.log").read_text().splitlines()
         if (frame := json.loads(line)).get("method") == method
     ]
+
+
+def test_spawn_environment_is_deny_by_default() -> None:
+    env = _spawn_env(
+        {
+            "HOME": "/home/muse",
+            "PATH": "/usr/bin",
+            "HTTPS_PROXY": "http://proxy.test",
+            "XDG_CONFIG_HOME": "/config",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "OPENAI_API_KEY": "secret",
+            "OMNIGENT_INTERNAL_TOKEN": "secret",
+            "PYTHONPATH": "/untrusted",
+        }
+    )
+
+    assert env == {
+        "HOME": "/home/muse",
+        "PATH": "/usr/bin",
+        "HTTPS_PROXY": "http://proxy.test",
+        "XDG_CONFIG_HOME": "/config",
+    }
 
 
 async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:

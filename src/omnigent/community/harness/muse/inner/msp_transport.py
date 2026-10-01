@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -31,6 +31,49 @@ from .muse_executor import (
 )
 
 JsonObject = dict[str, Any]
+
+# Keep the long-lived agent process isolated from credentials and runtime knobs
+# belonging to the harness. Additions should be limited to variables Muse needs
+# to locate user state, execute tools, or establish its network connection.
+_SPAWN_ENV_ALLOWLIST = frozenset(
+    {
+        "COLORTERM",
+        "FORCE_COLOR",
+        "HOME",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LOGNAME",
+        "NO_COLOR",
+        "NO_PROXY",
+        "PATH",
+        "SHELL",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TEMP",
+        "TERM",
+        "TMP",
+        "TMPDIR",
+        "USER",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+        "https_proxy",
+        "http_proxy",
+        "no_proxy",
+    }
+)
+
+
+def _spawn_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the deny-by-default environment supplied to ``muse serve``."""
+    values = os.environ if source is None else source
+    return {name: values[name] for name in _SPAWN_ENV_ALLOWLIST if name in values}
 
 
 def _package_version() -> str:
@@ -78,7 +121,7 @@ class MspTransport:
         client = await MspClient.spawn(
             [binary, "serve"],
             cwd=cwd,
-            env=env,
+            env=_spawn_env(env),
             client_version=_package_version(),
             client_title="Omnigent Muse",
         )
@@ -90,7 +133,7 @@ class MspTransport:
             self._client = await MspClient.spawn(
                 [binary, "serve"],
                 cwd=self._cwd,
-                env=self._env,
+                env=_spawn_env(self._env),
                 client_version=_package_version(),
                 client_title="Omnigent Muse",
             )
