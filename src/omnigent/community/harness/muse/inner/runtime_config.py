@@ -20,7 +20,9 @@ ENV_ENV_PASSTHROUGH = "HARNESS_MUSE_ENV_PASSTHROUGH"
 DEFAULT_APPROVAL_MODE = "onRequest"
 DEFAULT_TURN_IDLE_TIMEOUT = 300.0
 APPROVAL_MODES = frozenset({"always", "never", "onRequest"})
-REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh"})
+REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh"}
+)
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 

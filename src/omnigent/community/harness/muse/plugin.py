@@ -78,7 +78,7 @@ def get_contribution():
                 IntegrationMode.CLI_SUBPROCESS,  # spawns `muse serve`
                 Elicitation.JSONRPC,  # MSP structured approval requests
                 Resume.NONE,  # cross-process session-id persistence is not wired yet
-                EffortFamily.NONE,  # no matching effort family enum yet
+                EffortFamily.OPENAI,  # none/minimal/low/medium/high/xhigh
                 ModelFamily.MULTI,  # --provider meta / --model
                 AuthModel.OWN_AUTH,  # `muse auth` / `muse login`
                 subagents=False,

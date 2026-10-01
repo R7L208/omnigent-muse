@@ -65,6 +65,14 @@ def test_loads_all_runtime_options(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.env_passthrough == ("EXPLICIT", "FROM_OS_ENV")
 
 
+def test_accepts_openai_minimal_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENV_REASONING_EFFORT, "minimal")
+
+    assert load_runtime_config().reasoning_effort == "minimal"
+
+
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [

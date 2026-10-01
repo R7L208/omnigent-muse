@@ -214,6 +214,17 @@ async def test_rejects_invalid_per_turn_reasoning_effort_before_sending_prompt()
     assert transport.turns == []
 
 
+async def test_forwards_openai_minimal_per_turn_reasoning_effort() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+
+    await collect(
+        MuseExecutor(lambda: transport),
+        config=ExecutorConfig(extra={"reasoning_effort": "minimal"}),
+    )
+
+    assert transport.turns[0]["reasoning_effort"] == "minimal"
+
+
 async def test_does_not_silently_apply_model_to_existing_default_session() -> None:
     transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
     executor = MuseExecutor(lambda: transport)

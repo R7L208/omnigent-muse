@@ -60,7 +60,7 @@ def test_contribution_shape_and_capabilities():
     assert capabilities.integration_mode is IntegrationMode.CLI_SUBPROCESS
     assert capabilities.elicitation is Elicitation.JSONRPC
     assert capabilities.resume is Resume.NONE
-    assert capabilities.effort is EffortFamily.NONE
+    assert capabilities.effort is EffortFamily.OPENAI
     assert capabilities.model_family is ModelFamily.MULTI
     assert capabilities.auth is AuthModel.OWN_AUTH
     assert capabilities.subagents is False
@@ -175,6 +175,7 @@ def test_build_spawn_env_registers_all_runtime_options(monkeypatch):
 )
 def test_registered_in_omnigent():
     import omnigent.harness_plugins as hp
+    from omnigent.util.reasoning_effort import OPENAI_EFFORTS, efforts_for_harness
 
     hp.reset_plugin_state_for_tests()
     assert "muse" in hp.valid_harnesses()
@@ -184,4 +185,5 @@ def test_registered_in_omnigent():
         == "omnigent.community.harness.muse.inner.muse_harness"
     )
     assert any(r["id"] == "muse" and r["label"] == "Muse" for r in hp.harness_catalog())
+    assert efforts_for_harness("muse") == OPENAI_EFFORTS
     assert hp.plugin_state().load_errors == {}
