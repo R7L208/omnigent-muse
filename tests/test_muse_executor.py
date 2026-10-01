@@ -31,6 +31,7 @@ from omnigent.community.harness.muse.inner.muse_executor import (
     MuseTurnStarted,
 )
 
+
 class FakeTransport:
     def __init__(self, events: list[MuseEvent | BaseException] | None = None) -> None:
         self.events = events or []

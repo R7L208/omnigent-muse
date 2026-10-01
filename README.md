@@ -11,6 +11,11 @@ fingerprint-pinned to host 1.3.0 and rejects current CLI releases, with no newer
 on PyPI — so the SDK can't be a runtime dependency until Meta publishes a matching
 release. The vendored client is a thin seam that a future SDK can replace.
 
+Open a `TurnStream` before submitting its turn. Text deltas are correlated to
+their turn through `item/started`; deltas for unknown items are dropped. Usage,
+approvals, and terminal events require a matching `turnId`. This live stream does
+not replay or seed a snapshot for consumers attaching after a turn has begun.
+
 > **Status.** The harness is *discoverable* (id, alias `muse-code`, label, install
 > spec, capabilities, catalog row, importable `create_app()`), and the MSP transport
 > is implemented and hermetically tested — but the executor's `run_turn` is still a

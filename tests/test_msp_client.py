@@ -8,12 +8,13 @@ credentials, or network needed.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,7 +34,7 @@ FAKE_HOST = Path(__file__).parent / "fixtures" / "fake_msp_host.py"
 
 
 def _spawn_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
-    env = dict(os.environ)
+    env = os.environ.copy()
     env["FAKE_MSP_LOG"] = str(tmp_path / "fake.log")
     env.update(overrides)
     return env
@@ -188,6 +189,74 @@ async def test_non_retryable_error_raises_at_once(tmp_path: Path) -> None:
         await client.close()
 
 
+@pytest.mark.parametrize(
+    ("kind", "retryable", "attempts"),
+    [
+        ("backpressured", False, 1),
+        ("overloaded", False, 1),
+        ("backpressured", None, 2),
+        ("overloaded", None, 2),
+        ("backpressured", "invalid", 2),
+        ("temporary", True, 2),
+        ("invalidParams", None, 1),
+    ],
+)
+async def test_command_retry_flag_is_authoritative(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    retryable: bool | str | None,
+    attempts: int,
+) -> None:
+    client = await _spawn(tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    async def request(
+        method: str, params: dict[str, Any] | None = None, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        calls.append(dict(params or {}))
+        if len(calls) == 1:
+            data = {} if retryable is None else {"retryable": retryable}
+            raise MspError(-32001, "busy", kind=kind, data=data)
+        return {"status": "accepted"}
+
+    monkeypatch.setattr(client, "request", request)
+    try:
+        if attempts == 1:
+            with pytest.raises(MspError):
+                await client.command("turn/start", {"sessionId": "s"})
+        else:
+            assert await client.command("turn/start", {"sessionId": "s"}) == {
+                "status": "accepted"
+            }
+        assert len(calls) == attempts
+        assert len({call["commandId"] for call in calls}) == 1
+    finally:
+        await client.close()
+
+
+async def test_command_retry_exhaustion_preserves_command_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = await _spawn(tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    async def request(
+        method: str, params: dict[str, Any] | None = None, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        calls.append(dict(params or {}))
+        raise MspError(-32001, "busy", kind="backpressured", data={"retryable": True})
+
+    monkeypatch.setattr(client, "request", request)
+    try:
+        with pytest.raises(MspError, match="busy"):
+            await client.command("turn/start", {"sessionId": "s"}, max_attempts=2)
+        assert len(calls) == 2
+        assert calls[0]["commandId"] == calls[1]["commandId"]
+    finally:
+        await client.close()
+
+
 async def test_malformed_response_is_protocol_error(tmp_path: Path) -> None:
     client = await _spawn(tmp_path, FAKE_MSP_BAD_RESPONSE="1")
     try:
@@ -206,12 +275,14 @@ async def test_host_death_mid_turn(tmp_path: Path) -> None:
     client = await _spawn(tmp_path, FAKE_MSP_SCENARIO="die_on_turn")
     try:
         session_id = (await client.start_session())["sessionId"]
-        with client.open_stream(session_id) as stream:
-            with pytest.raises(MspConnectionClosed):
-                turn_id = await client.send_turn(
-                    session_id, [{"type": "text", "text": "hi"}]
-                )
-                [e async for e in stream.follow(turn_id)]
+        with (
+            client.open_stream(session_id) as stream,
+            pytest.raises(MspConnectionClosed),
+        ):
+            turn_id = await client.send_turn(
+                session_id, [{"type": "text", "text": "hi"}]
+            )
+            [e async for e in stream.follow(turn_id)]
     finally:
         await client.close()
 
@@ -226,79 +297,167 @@ async def test_request_timeout(tmp_path: Path) -> None:
         await client.close()
 
 
-# ---------------------------------------------------------------------------
-# Regression tests for two bugs found by code review in PR #1's msp_client.py.
-# They are xfail today because the fixes live on PR #1's branch; once that
-# author lands the fix, each test flips to xpass — remove the marker then.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(
-    reason="PR #1 finding #4: request() timeout never pops the pending future "
-    "from self._pending, leaking an entry per timed-out request. Remove this "
-    "marker once the fix lands.",
-    strict=False,
-)
 async def test_request_timeout_clears_pending(tmp_path: Path) -> None:
     client = await _spawn(tmp_path, FAKE_MSP_HANG="usage/read")
     try:
-        session_id = (await client.start_session())["sessionId"]
-        with pytest.raises(TimeoutError, match="usage/read"):
-            await client.read_usage(session_id, timeout=0.2)
-        # The completed start_session request was popped by the reader; the
-        # timed-out request must be popped too, or a long-lived client grows
-        # self._pending without bound.
+        for _ in range(3):
+            with pytest.raises(TimeoutError, match="usage/read"):
+                await client.read_usage("s", timeout=0.02)
+            assert client._pending == {}
+    finally:
+        await client.close()
+
+
+async def test_request_cancellation_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_HANG="usage/read")
+    request = asyncio.create_task(client.read_usage("s"))
+    try:
+        async with asyncio.timeout(2):
+            while not _method_frames(tmp_path, "usage/read"):
+                await asyncio.sleep(0.01)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert client._pending == {}
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await client.close()
+
+
+async def test_serialization_failure_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path)
+    try:
+        with pytest.raises(MspProtocolError, match="JSON-encodable"):
+            await client.request("usage/read", {"invalid": object()})
         assert client._pending == {}
     finally:
         await client.close()
 
 
-@pytest.mark.xfail(
-    reason="PR #1 finding #5: cancelling the writer mid-drain sets CancelledError "
-    "on the in-flight request's future, so the caller sees CancelledError instead "
-    "of MspConnectionClosed. Remove this marker once the fix lands.",
-    strict=False,
-)
+async def test_late_response_after_timeout_is_ignored(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_HANG="usage/read")
+    try:
+        with pytest.raises(TimeoutError):
+            await client.read_usage("s", timeout=0.02)
+        [request] = _method_frames(tmp_path, "usage/read")
+        frame = {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+        client._route_frame(frame, json.dumps(frame))
+        assert client._pending == {}
+        assert not client.closed
+        assert (await client.start_session())["sessionId"] == "sess-1"
+    finally:
+        await client.close()
+
+
+async def test_eof_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_SCENARIO="die_on_turn")
+    try:
+        with pytest.raises(MspConnectionClosed):
+            await client.send_turn("s", [{"type": "text", "text": "hi"}])
+        assert client._pending == {}
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("close_client", [False, True])
 async def test_pending_request_reports_closed_when_writer_cancelled(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close_client: bool
 ) -> None:
     client = await _spawn(tmp_path)
-    assert client._proc is not None
-    real_stdin = client._proc.stdin
+    await client.flush()
+    entered = asyncio.Event()
+
+    async def blocked_write(encoded: bytes) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "_write_once", blocked_write)
+    request = asyncio.create_task(client.read_usage("s"))
+    queued = asyncio.create_task(client.read_usage("s"))
     try:
-        # Wedge the in-flight write inside drain() so the writer task is parked
-        # on our request's frame when teardown cancels it.
-        class _BlockingStdin:
-            def write(self, data: bytes) -> None: ...
-
-            async def drain(self) -> None:
-                await asyncio.Event().wait()
-
-            def close(self) -> None: ...
-
-        # Drain the handshake's queued frames first so the writer parks on our
-        # request below, not on a leftover future-less notification.
-        await client.flush()
-        client._proc.stdin = _BlockingStdin()  # type: ignore[assignment]
-
-        pending = asyncio.ensure_future(
-            client.request("usage/read", {"sessionId": "s"}, timeout=5)
-        )
-        # Let the request enqueue its frame and the writer park in drain().
-        await asyncio.sleep(0.05)
-
-        # Teardown cancels the writer while our write is wedged in drain().
-        client._writer_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await client._writer_task
-
-        # The caller should learn the connection is closing, not inherit the
-        # writer's own cancellation.
-        with pytest.raises(MspConnectionClosed):
-            await pending
+        async with asyncio.timeout(2):
+            await entered.wait()
+        if close_client:
+            await client.close()
+        else:
+            client._writer_task.cancel()
+            await asyncio.gather(client._writer_task, return_exceptions=True)
+        for task in (request, queued):
+            with pytest.raises(MspConnectionClosed):
+                await task
+        assert client.closed
+        assert client._pending == {}
+        await client.flush(timeout=0.2)
     finally:
-        client._proc.stdin = real_stdin
+        for task in (request, queued):
+            task.cancel()
+        await asyncio.gather(request, queued, return_exceptions=True)
         await client.close()
+
+
+@pytest.mark.parametrize(
+    "exit_mode", ["cancel", "yield", "complete", "eof", "both_ready"]
+)
+async def test_follow_joins_helpers_on_every_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_mode: str
+) -> None:
+    client = await _spawn(tmp_path)
+    helpers: list[asyncio.Task[Any]] = []
+    ready = asyncio.Event()
+    real_wait = asyncio.wait
+
+    async def record_wait(
+        tasks: Iterable[asyncio.Task[Any]], *, return_when: str
+    ) -> tuple[set[asyncio.Task[Any]], set[asyncio.Task[Any]]]:
+        pair = tuple(tasks)
+        helpers.extend(pair)
+        ready.set()
+        return await real_wait(pair, return_when=return_when)
+
+    monkeypatch.setattr(asyncio, "wait", record_wait)
+    with client.open_stream("s") as stream:
+        iterator = stream.follow("t")
+        if exit_mode == "yield":
+            client._fan_out(
+                "item/delta",
+                {"sessionId": "s", "turnId": "t", "itemId": "i", "delta": "hello"},
+            )
+        elif exit_mode in {"complete", "both_ready"}:
+            client._fan_out("turn/completed", {"sessionId": "s", "turnId": "t"})
+            if exit_mode == "both_ready":
+                client._finish(MspConnectionClosed("test EOF"))
+        consumer = asyncio.create_task(anext(iterator))
+        try:
+            async with asyncio.timeout(2):
+                await ready.wait()
+                if exit_mode == "cancel":
+                    consumer.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await consumer
+                elif exit_mode == "eof":
+                    client._proc.kill()
+                    with pytest.raises(MspConnectionClosed):
+                        await consumer
+                else:
+                    event = await consumer
+                    expected = (
+                        MspTextDelta if exit_mode == "yield" else MspTurnCompleted
+                    )
+                    assert isinstance(event, expected)
+                assert len(helpers) == 2
+                assert all(task.done() for task in helpers)
+                if exit_mode in {"complete", "both_ready"}:
+                    with pytest.raises(StopAsyncIteration):
+                        await anext(iterator)
+                await iterator.aclose()
+        finally:
+            consumer.cancel()
+            for task in helpers:
+                task.cancel()
+            await asyncio.gather(consumer, *helpers, return_exceptions=True)
+            await iterator.aclose()
+            await client.close()
 
 
 async def test_close_reaps_child(tmp_path: Path) -> None:
@@ -355,19 +514,299 @@ async def test_server_request_default_answer(tmp_path: Path) -> None:
         await client.close()
 
 
+@pytest.mark.parametrize("host_dies", [False, True])
+async def test_close_joins_server_request_handlers(
+    tmp_path: Path, host_dies: bool
+) -> None:
+    client = await _spawn(tmp_path)
+    entered = asyncio.Event()
+    exited = asyncio.Event()
+
+    async def handler(method: str, params: dict) -> dict:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            exited.set()
+        return {}
+
+    client.set_server_request_handler(handler)
+    frame = {"jsonrpc": "2.0", "id": 900, "method": "host/ping", "params": {}}
+    before = asyncio.all_tasks()
+    client._route_frame(frame, json.dumps(frame))
+    [handler_task] = asyncio.all_tasks() - before
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+        if host_dies:
+            client._proc.kill()
+            await client.wait_closed()
+        await client.close()
+        assert exited.is_set()
+        assert handler_task.done()
+        assert client._server_request_tasks == set()
+    finally:
+        handler_task.cancel()
+        await asyncio.gather(handler_task, return_exceptions=True)
+        await client.close()
+
+
+@pytest.mark.parametrize("response", ["success", "msp_error", "exception"])
+async def test_server_request_handler_response_and_self_eviction(
+    tmp_path: Path, response: str
+) -> None:
+    client = await _spawn(tmp_path)
+
+    async def handler(method: str, params: dict) -> dict:
+        assert (method, params) == ("host/ping", {"value": 1})
+        if response == "msp_error":
+            raise MspError(-32000, "denied", kind="denied", data={"retryable": False})
+        if response == "exception":
+            raise ValueError("handler failed")
+        return {"ok": True}
+
+    client.set_server_request_handler(handler)
+    frame = {"jsonrpc": "2.0", "id": 901, "method": "host/ping", "params": {"value": 1}}
+    try:
+        client._route_frame(frame, json.dumps(frame))
+        tasks = tuple(client._server_request_tasks)
+        assert len(tasks) == 1
+        await asyncio.gather(*tasks)
+        assert client._server_request_tasks == set()
+        await client.flush()
+        async with asyncio.timeout(2):
+            while not (answers := [f for f in _logged(tmp_path) if f.get("id") == 901]):
+                await asyncio.sleep(0.01)
+        [answer] = answers
+        if response == "success":
+            assert answer["result"] == {"ok": True}
+        elif response == "msp_error":
+            assert answer["error"]["code"] == -32000
+            assert answer["error"]["data"] == {"kind": "denied", "retryable": False}
+        else:
+            assert answer["error"]["code"] == -32603
+            assert answer["error"]["message"] == "handler failed"
+    finally:
+        await client.close()
+
+
+async def test_server_request_handler_can_close_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = await _spawn(tmp_path)
+    returned = asyncio.Event()
+    real_gather = asyncio.gather
+
+    async def reject_self_join(*tasks, return_exceptions=False):
+        # Catch the invalid dependency before asyncio recursively cancels it.
+        assert asyncio.current_task() not in tasks, "close must not join its caller"
+        return await real_gather(*tasks, return_exceptions=return_exceptions)
+
+    monkeypatch.setattr(asyncio, "gather", reject_self_join)
+
+    async def handler(method: str, params: dict) -> dict:
+        await client.close()
+        returned.set()
+        return {}
+
+    client.set_server_request_handler(handler)
+    frame = {"jsonrpc": "2.0", "id": 902, "method": "host/close", "params": {}}
+    client._route_frame(frame, json.dumps(frame))
+    [task] = client._server_request_tasks
+    try:
+        async with asyncio.timeout(2):
+            await real_gather(task, return_exceptions=True)
+        assert returned.is_set()
+        assert client._proc.returncode is not None
+        assert client._server_request_tasks == set()
+    finally:
+        task.cancel()
+        await real_gather(task, return_exceptions=True)
+        await client.close()
+        await client._proc.wait()
+        await real_gather(
+            client._reader_task,
+            client._stderr_task,
+            client._writer_task,
+            return_exceptions=True,
+        )
+
+
+async def test_close_awaits_async_handler_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = await _spawn(tmp_path)
+    entered = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    release = asyncio.Event()
+    joining = asyncio.Event()
+    real_gather = asyncio.gather
+
+    async def observe_join(*tasks, return_exceptions=False):
+        joining.set()
+        return await real_gather(*tasks, return_exceptions=return_exceptions)
+
+    monkeypatch.setattr(asyncio, "gather", observe_join)
+
+    async def handler(method: str, params: dict) -> dict:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await release.wait()
+            cleanup_finished.set()
+        return {}
+
+    client.set_server_request_handler(handler)
+    frame = {"jsonrpc": "2.0", "id": 903, "method": "host/ping", "params": {}}
+    client._route_frame(frame, json.dumps(frame))
+    [handler_task] = client._server_request_tasks
+    async with asyncio.timeout(2):
+        await entered.wait()
+    closing = asyncio.create_task(client.close())
+    try:
+        async with asyncio.timeout(2):
+            await cleanup_started.wait()
+            await joining.wait()
+            release.set()
+            await closing
+        assert cleanup_finished.is_set()
+        assert handler_task.done()
+        assert handler_task.cancelling() == 1
+    finally:
+        release.set()
+        await real_gather(closing, handler_task, return_exceptions=True)
+        await client.close()
+
+
 async def test_approval_requested_event_shape() -> None:
     # Pure translation check (no host needed): unknown shapes are dropped,
     # known ones surface the approval id.
     translate = MspClient._translate_notification
-    assert translate("s", "t", "approval/requested", {"sessionId": "s"}) is None
+    assert (
+        translate("s", "t", "approval/requested", {"sessionId": "s", "turnId": "t"})
+        is None
+    )
     event = translate(
         "s",
         "t",
         "approval/requested",
-        {"sessionId": "s", "approval": {"approvalId": "a-1"}},
+        {"sessionId": "s", "turnId": "t", "approval": {"approvalId": "a-1"}},
     )
     assert isinstance(event, MspApprovalRequested)
     assert event.approval_id == "a-1"
+
+
+@pytest.mark.parametrize(
+    ("method", "payload"),
+    [
+        ("item/delta", {"itemId": "i", "delta": "hello"}),
+        ("session/tokenUsage", {"totalTokens": 3}),
+        ("approval/requested", {"approvalId": "a"}),
+        ("turn/completed", {}),
+        ("turn/retracted", {}),
+    ],
+)
+@pytest.mark.parametrize(
+    "scope", ["matching", "foreign_session", "foreign_turn", "missing_turn"]
+)
+def test_translation_checks_event_scope(
+    method: str, payload: dict[str, Any], scope: str
+) -> None:
+    params = {"sessionId": "s", "turnId": "t", **payload}
+    if scope == "foreign_session":
+        params["sessionId"] = "other"
+    elif scope == "foreign_turn":
+        params["turnId"] = "other"
+    elif scope == "missing_turn":
+        params.pop("turnId")
+    event = MspClient._translate_notification("s", "t", method, params)
+    assert (event is not None) == (scope == "matching")
+
+
+async def test_follow_correlates_items_and_rejects_other_turns(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path)
+    original_deltas: list[dict[str, Any]] = []
+    client.subscribe(
+        lambda method, params: (
+            original_deltas.append(params) if method == "item/delta" else None
+        )
+    )
+    try:
+        with client.open_stream("s") as first, client.open_stream("s") as second:
+            for turn, item in [("foreign", "i-other"), ("t", "i-own")]:
+                client._fan_out(
+                    "item/started",
+                    {"sessionId": "s", "item": {"itemId": item, "turnId": turn}},
+                )
+                client._fan_out(
+                    "item/delta", {"sessionId": "s", "itemId": item, "delta": turn}
+                )
+                client._fan_out(
+                    "session/tokenUsage",
+                    {"sessionId": "s", "turnId": turn, "totalTokens": 3},
+                )
+                client._fan_out(
+                    "approval/requested",
+                    {"sessionId": "s", "turnId": turn, "approvalId": turn},
+                )
+            for turn in ("foreign", "t"):
+                client._fan_out("turn/completed", {"sessionId": "s", "turnId": turn})
+
+            async def collect(stream, turn: str):
+                return [event async for event in stream.follow(turn)]
+
+            async with asyncio.timeout(2):
+                streams = await asyncio.gather(
+                    collect(first, "t"), collect(second, "foreign")
+                )
+            for turn, events in zip(("t", "foreign"), streams, strict=True):
+                assert [e.delta for e in events if isinstance(e, MspTextDelta)] == [
+                    turn
+                ]
+                assert len([e for e in events if isinstance(e, MspTokenUsage)]) == 1
+                assert [
+                    e.approval_id for e in events if isinstance(e, MspApprovalRequested)
+                ] == [turn]
+                assert [
+                    e.turn_id for e in events if isinstance(e, MspTurnCompleted)
+                ] == [turn]
+        assert all("turnId" not in params for params in original_deltas)
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("item_state", ["unknown", "completed", "foreign_session"])
+async def test_follow_drops_unassociated_item_deltas(
+    tmp_path: Path, item_state: str
+) -> None:
+    client = await _spawn(tmp_path)
+    try:
+        with client.open_stream("s") as stream:
+            item = {"itemId": "i", "turnId": "t"}
+            if item_state != "unknown":
+                client._fan_out(
+                    "item/started",
+                    {
+                        "sessionId": "other"
+                        if item_state == "foreign_session"
+                        else "s",
+                        "item": item,
+                    },
+                )
+            if item_state == "completed":
+                client._fan_out("item/completed", {"sessionId": "s", "item": item})
+            client._fan_out(
+                "item/delta", {"sessionId": "s", "itemId": "i", "delta": "drop"}
+            )
+            client._fan_out("turn/completed", {"sessionId": "s", "turnId": "t"})
+            async with asyncio.timeout(2):
+                events = [event async for event in stream.follow("t")]
+            assert [type(event) for event in events] == [MspTurnCompleted]
+    finally:
+        await client.close()
 
 
 def test_mint_command_id_is_uuid7() -> None:

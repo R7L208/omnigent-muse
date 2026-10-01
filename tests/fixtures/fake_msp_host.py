@@ -176,6 +176,23 @@ def main() -> int:
             _send(
                 {
                     "jsonrpc": "2.0",
+                    "method": "item/started",
+                    "params": {
+                        "sessionId": session_id,
+                        "item": {
+                            "itemId": "item-1",
+                            "turnId": command_id,
+                            "kind": "agentMessage",
+                            "status": "inProgress",
+                            "revision": 1,
+                            "text": "",
+                        },
+                    },
+                }
+            )
+            _send(
+                {
+                    "jsonrpc": "2.0",
                     "method": "item/delta",
                     "params": {
                         "sessionId": session_id,
@@ -198,9 +215,27 @@ def main() -> int:
             _send(
                 {
                     "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "sessionId": session_id,
+                        "item": {
+                            "itemId": "item-1",
+                            "turnId": command_id,
+                            "kind": "agentMessage",
+                            "status": "completed",
+                            "revision": 2,
+                            "text": "Hello, world",
+                        },
+                    },
+                }
+            )
+            _send(
+                {
+                    "jsonrpc": "2.0",
                     "method": "session/tokenUsage",
                     "params": {
                         "sessionId": session_id,
+                        "turnId": command_id,
                         "promptTokens": 10,
                         "outputTokens": 5,
                         "totalTokens": 15,
