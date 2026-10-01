@@ -175,8 +175,9 @@ class MspTransport:
     async def decide_approval(
         self, session_id: str, approval_id: str, choice_id: str
     ) -> None:
-        requirement_id = self._approval_requirements.pop(
-            (session_id, approval_id),
+        key = (session_id, approval_id)
+        requirement_id = self._approval_requirements.get(
+            key,
             {"approvalId": approval_id, "sourceIndex": 0},
         )
         try:
@@ -186,6 +187,7 @@ class MspTransport:
             )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
             raise self._error(exc) from exc
+        self._approval_requirements.pop(key, None)
 
     async def interrupt_turn(self, session_id: str, turn_id: str | None) -> bool:
         try:
