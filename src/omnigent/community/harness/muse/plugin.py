@@ -119,9 +119,4 @@ def build_spawn_env(spec, *, cwd=None) -> dict[str, str]:
     names = _passthrough_names(config.get("env_passthrough"))
     if names and "HARNESS_MUSE_ENV_PASSTHROUGH" not in os.environ:
         env["HARNESS_MUSE_ENV_PASSTHROUGH"] = ",".join(names)
-    # The runner normally inherits these already. Copying explicitly makes the
-    # opt-in reliable for process managers that construct a narrow environment.
-    for name in names:
-        if name in os.environ:
-            env[name] = os.environ[name]
     return env

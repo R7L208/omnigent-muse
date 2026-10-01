@@ -151,7 +151,7 @@ def test_spawn_env_uses_spec_values_but_ambient_wins(
     assert env[ENV_TURN_IDLE_TIMEOUT] == "30"
     assert json.loads(env[ENV_OS_ENV])["sandbox"]["type"] == "none"
     assert env[ENV_ENV_PASSTHROUGH] == "ALLOWED_TOKEN"
-    assert env["ALLOWED_TOKEN"] == "secret"
+    assert "ALLOWED_TOKEN" not in env
 
 
 def test_executor_factory_applies_validated_defaults_to_respawn_factory(

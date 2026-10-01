@@ -166,7 +166,7 @@ def test_build_spawn_env_registers_all_runtime_options(monkeypatch):
     assert env["HARNESS_MUSE_TURN_IDLE_TIMEOUT"] == "45"
     assert json.loads(env["HARNESS_MUSE_OS_ENV"])["sandbox"]["type"] == "none"
     assert env["HARNESS_MUSE_ENV_PASSTHROUGH"] == "MUSE_TEST_TOKEN"
-    assert env["MUSE_TEST_TOKEN"] == "token-value"
+    assert "MUSE_TEST_TOKEN" not in env
 
 
 @pytest.mark.skipif(
