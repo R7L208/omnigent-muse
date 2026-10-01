@@ -187,6 +187,7 @@ async def test_rejects_conflicting_per_turn_model_before_sending_prompt() -> Non
     [error] = events
     assert isinstance(error, ExecutorError)
     assert "model-b" in error.message and "model-a" in error.message
+    assert error.preserve_session is True
     assert transport.turns == []
 
 
@@ -199,6 +200,7 @@ async def test_does_not_silently_apply_model_to_existing_default_session() -> No
     [error] = events
     assert isinstance(error, ExecutorError)
     assert "model-late" in error.message
+    assert error.preserve_session is True
 
 
 @dataclass
@@ -298,7 +300,7 @@ async def test_cancelled_and_failed_turns_are_terminal_events() -> None:
     )
     assert await collect(MuseExecutor(lambda: cancelled)) == [TurnCancelled("stopped")]
     assert await collect(MuseExecutor(lambda: failed)) == [
-        ExecutorError("host busy", retryable=True)
+        ExecutorError("host busy", retryable=True, preserve_session=True)
     ]
 
 
@@ -306,6 +308,15 @@ async def test_transport_failure_becomes_executor_error() -> None:
     transport = FakeTransport([MuseTransportError("host exited", retryable=True)])
     assert await collect(MuseExecutor(lambda: transport)) == [
         ExecutorError("Muse transport error: host exited", retryable=True)
+    ]
+
+
+async def test_idle_transport_failure_preserves_session() -> None:
+    transport = FakeTransport(
+        [MuseTransportError("turn rejected", preserve_session=True)]
+    )
+    assert await collect(MuseExecutor(lambda: transport)) == [
+        ExecutorError("Muse transport error: turn rejected", preserve_session=True)
     ]
 
 

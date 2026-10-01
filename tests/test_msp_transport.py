@@ -58,11 +58,14 @@ class _ScriptedClient:
         self.events = events or []
         self.approval_calls: list[dict[str, Any]] = []
         self.approval_error: Exception | None = None
+        self.turn_error: Exception | None = None
 
     def open_stream(self, session_id: str) -> _ScriptedStream:
         return _ScriptedStream(self.events)
 
     async def send_turn(self, *args: object, **kwargs: object) -> str:
+        if self.turn_error is not None:
+            raise self.turn_error
         return "turn-1"
 
     async def decide_approval(
@@ -343,6 +346,24 @@ async def test_adapter_translates_stream_errors(
         ]
     assert str(caught.value) == str(error)
     assert caught.value.retryable is retryable
+    assert caught.value.preserve_session is False
+
+
+async def test_rejected_turn_start_preserves_healthy_session() -> None:
+    client = _ScriptedClient()
+    client.turn_error = MspError(-32000, "busy", data={"retryable": True})
+    transport = MspTransport(cast(Any, client))
+
+    with pytest.raises(MuseTransportError) as caught:
+        _ = [
+            event
+            async for event in transport.run_turn(
+                "s", text="hello", reasoning_effort=None
+            )
+        ]
+
+    assert caught.value.retryable is True
+    assert caught.value.preserve_session is True
 
 
 async def test_approval_requirement_is_preserved_after_failed_decision() -> None:

@@ -96,9 +96,16 @@ type MuseEvent = (
 
 
 class MuseTransportError(Exception):
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        preserve_session: bool = False,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.preserve_session = preserve_session
 
 
 class MuseTransport(Protocol):
@@ -368,7 +375,8 @@ class MuseExecutor(Executor):
         ):
             yield ExecutorError(
                 f"Muse session uses model {self._model!r}; cannot apply per-turn "
-                f"model {requested_model!r} without restarting the session."
+                f"model {requested_model!r} without restarting the session.",
+                preserve_session=True,
             )
             return
         effective_model = requested_model or self._model
@@ -427,6 +435,7 @@ class MuseExecutor(Executor):
                             event.error or f"Muse turn {event.state}",
                             retryable=event.retryable,
                             usage=self._usage(event.usage),
+                            preserve_session=True,
                         )
                     return
             yield ExecutorError("Muse stream ended without a terminal turn event")
@@ -434,6 +443,7 @@ class MuseExecutor(Executor):
             yield ExecutorError(
                 f"Muse transport error: {describe_exception(exc)}",
                 retryable=exc.retryable,
+                preserve_session=exc.preserve_session,
             )
         except Exception as exc:
             logger.exception("Muse turn failed")

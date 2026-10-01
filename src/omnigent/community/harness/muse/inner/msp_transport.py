@@ -170,11 +170,16 @@ class MspTransport:
         try:
             client = await self._get_client()
             with client.open_stream(session_id) as stream:
-                turn_id = await client.send_turn(
-                    session_id,
-                    [{"type": "text", "text": text}],
-                    reasoning_effort=reasoning_effort,
-                )
+                try:
+                    turn_id = await client.send_turn(
+                        session_id,
+                        [{"type": "text", "text": text}],
+                        reasoning_effort=reasoning_effort,
+                    )
+                except MspError as exc:
+                    # A rejected turn/start request leaves the established
+                    # session idle and available for another turn.
+                    raise self._error(exc, preserve_session=True) from exc
                 yield MuseTurnStarted(turn_id)
                 latest_usage: JsonObject = {}
                 async for event in stream.follow(turn_id):
@@ -377,8 +382,12 @@ class MspTransport:
         return usage
 
     @staticmethod
-    def _error(exc: Exception) -> MuseTransportError:
+    def _error(
+        exc: Exception, *, preserve_session: bool = False
+    ) -> MuseTransportError:
         retryable = isinstance(exc, MspConnectionClosed) or (
             isinstance(exc, MspError) and exc.retryable is True
         )
-        return MuseTransportError(str(exc), retryable=retryable)
+        return MuseTransportError(
+            str(exc), retryable=retryable, preserve_session=preserve_session
+        )
