@@ -65,12 +65,16 @@ def test_loads_all_runtime_options(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.env_passthrough == ("EXPLICIT", "FROM_OS_ENV")
 
 
-def test_accepts_openai_minimal_reasoning_effort(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+)
+def test_accepts_msp_reasoning_efforts(
+    monkeypatch: pytest.MonkeyPatch, reasoning_effort: str
 ) -> None:
-    monkeypatch.setenv(ENV_REASONING_EFFORT, "minimal")
+    monkeypatch.setenv(ENV_REASONING_EFFORT, reasoning_effort)
 
-    assert load_runtime_config().reasoning_effort == "minimal"
+    assert load_runtime_config().reasoning_effort == reasoning_effort
 
 
 @pytest.mark.parametrize(
@@ -203,11 +207,21 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
 
 
 @pytest.mark.parametrize(
-    "approval_mode",
-    ["allowAll", "promptUnmatched", "onRequest", "denyUnmatched"],
+    ("approval_mode", "reasoning_effort"),
+    [
+        ("allowAll", "high"),
+        ("promptUnmatched", "high"),
+        ("onRequest", "high"),
+        ("denyUnmatched", "high"),
+        ("onRequest", "max"),
+        ("onRequest", "ultra"),
+    ],
 )
 async def test_declarative_config_reaches_real_msp_session_and_turn(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, approval_mode: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    approval_mode: str,
+    reasoning_effort: str,
 ) -> None:
     from omnigent.community.harness.muse.inner.msp_client import MspClient
     from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
@@ -221,7 +235,7 @@ async def test_declarative_config_reaches_real_msp_session_and_turn(
     spec = SimpleNamespace(
         executor=SimpleNamespace(
             model="configured-model",
-            reasoning_effort="high",
+            reasoning_effort=reasoning_effort,
             config={
                 "approval_mode": approval_mode,
                 "turn_idle_timeout": 19,
@@ -260,6 +274,6 @@ async def test_declarative_config_reaches_real_msp_session_and_turn(
     assert session["params"]["workspaceRoot"] == str(tmp_path)
     assert session["params"]["approvalMode"] == approval_mode
     assert session["params"]["modelId"] == "configured-model"
-    assert turn["params"]["reasoningEffort"] == "high"
+    assert turn["params"]["reasoningEffort"] == reasoning_effort
     assert turn["params"]["input"] == [{"type": "text", "text": "Be concise.\n\nhello"}]
     assert any(isinstance(event, TurnComplete) for event in events)

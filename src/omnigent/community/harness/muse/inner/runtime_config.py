@@ -23,7 +23,9 @@ DEFAULT_TURN_IDLE_TIMEOUT = 300.0
 APPROVAL_MODES = frozenset(
     {"allowAll", "promptUnmatched", "onRequest", "denyUnmatched"}
 )
-REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+)
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
