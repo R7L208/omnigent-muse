@@ -148,7 +148,7 @@ def test_build_spawn_env_registers_all_runtime_options(monkeypatch):
             model="muse-large",
             reasoning_effort="high",
             config={
-                "approval_mode": "always",
+                "approval_mode": "allowAll",
                 "turn_idle_timeout": 45,
                 "env_passthrough": ["MUSE_TEST_TOKEN"],
             },
@@ -161,7 +161,7 @@ def test_build_spawn_env_registers_all_runtime_options(monkeypatch):
 
     assert env["HARNESS_MUSE_MODEL"] == "muse-large"
     assert env["HARNESS_MUSE_CWD"] == "/tmp/workspace"
-    assert env["HARNESS_MUSE_APPROVAL_MODE"] == "always"
+    assert env["HARNESS_MUSE_APPROVAL_MODE"] == "allowAll"
     assert env["HARNESS_MUSE_REASONING_EFFORT"] == "high"
     assert env["HARNESS_MUSE_TURN_IDLE_TIMEOUT"] == "45"
     assert json.loads(env["HARNESS_MUSE_OS_ENV"])["sandbox"]["type"] == "none"

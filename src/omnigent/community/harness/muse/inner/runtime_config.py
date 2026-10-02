@@ -20,10 +20,10 @@ ENV_ENV_PASSTHROUGH = "HARNESS_MUSE_ENV_PASSTHROUGH"
 
 DEFAULT_APPROVAL_MODE = "onRequest"
 DEFAULT_TURN_IDLE_TIMEOUT = 300.0
-APPROVAL_MODES = frozenset({"always", "never", "onRequest"})
-REASONING_EFFORTS = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh"}
+APPROVAL_MODES = frozenset(
+    {"allowAll", "promptUnmatched", "onRequest", "denyUnmatched"}
 )
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -56,9 +56,13 @@ def _idle_timeout() -> float:
     try:
         value = float(raw)
     except ValueError as exc:
-        raise ValueError(f"{ENV_TURN_IDLE_TIMEOUT} must be a number; got {raw!r}") from exc
+        raise ValueError(
+            f"{ENV_TURN_IDLE_TIMEOUT} must be a number; got {raw!r}"
+        ) from exc
     if not 0 < value < float("inf"):
-        raise ValueError(f"{ENV_TURN_IDLE_TIMEOUT} must be finite and greater than zero")
+        raise ValueError(
+            f"{ENV_TURN_IDLE_TIMEOUT} must be finite and greater than zero"
+        )
     return value
 
 
@@ -87,7 +91,11 @@ def _os_env() -> OSEnvSpec | None:
     if sandbox_payload is not None and not isinstance(sandbox_payload, dict):
         raise ValueError(f"{ENV_OS_ENV}.sandbox must be an object or null")
     try:
-        sandbox = decode_sandbox_spec(sandbox_payload) if sandbox_payload is not None else None
+        sandbox = (
+            decode_sandbox_spec(sandbox_payload)
+            if sandbox_payload is not None
+            else None
+        )
         return OSEnvSpec(
             type=env_type,
             cwd=cwd,

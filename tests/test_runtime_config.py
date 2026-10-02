@@ -51,14 +51,14 @@ def test_loads_all_runtime_options(monkeypatch: pytest.MonkeyPatch) -> None:
         cwd="/workspace",
         sandbox=OSEnvSandboxSpec(type="none", env_passthrough=["FROM_OS_ENV"]),
     )
-    monkeypatch.setenv(ENV_APPROVAL_MODE, "always")
+    monkeypatch.setenv(ENV_APPROVAL_MODE, "allowAll")
     monkeypatch.setenv(ENV_REASONING_EFFORT, "high")
     monkeypatch.setenv(ENV_TURN_IDLE_TIMEOUT, "12.5")
     monkeypatch.setenv(ENV_OS_ENV, json.dumps(dataclasses.asdict(os_env)))
     monkeypatch.setenv(ENV_ENV_PASSTHROUGH, "EXPLICIT,FROM_OS_ENV")
 
     config = load_runtime_config()
-    assert config.approval_mode == "always"
+    assert config.approval_mode == "allowAll"
     assert config.reasoning_effort == "high"
     assert config.turn_idle_timeout == 12.5
     assert config.os_env is not None and config.os_env.cwd == "/workspace"
@@ -73,13 +73,39 @@ def test_accepts_openai_minimal_reasoning_effort(
     assert load_runtime_config().reasoning_effort == "minimal"
 
 
+@pytest.mark.parametrize(
+    "approval_mode",
+    ["allowAll", "promptUnmatched", "onRequest", "denyUnmatched"],
+)
+def test_accepts_msp_approval_modes(
+    monkeypatch: pytest.MonkeyPatch, approval_mode: str
+) -> None:
+    monkeypatch.setenv(ENV_APPROVAL_MODE, approval_mode)
+
+    assert load_runtime_config().approval_mode == approval_mode
+
+
+@pytest.mark.parametrize("approval_mode", ["always", "never", "sometimes"])
+def test_rejects_invalid_approval_modes(
+    monkeypatch: pytest.MonkeyPatch, approval_mode: str
+) -> None:
+    monkeypatch.setenv(ENV_APPROVAL_MODE, approval_mode)
+
+    with pytest.raises(ValueError, match="must be one of"):
+        load_runtime_config()
+
+
 def test_active_sandbox_excludes_desktop_session_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     os_env = OSEnvSpec(
         sandbox=OSEnvSandboxSpec(
             type="linux_bwrap",
-            env_passthrough=["GITHUB_TOKEN", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"],
+            env_passthrough=[
+                "GITHUB_TOKEN",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_RUNTIME_DIR",
+            ],
         )
     )
     monkeypatch.setenv(ENV_OS_ENV, json.dumps(dataclasses.asdict(os_env)))
@@ -107,7 +133,6 @@ def test_unsandboxed_environment_allows_explicit_desktop_passthrough(
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [
-        (ENV_APPROVAL_MODE, "sometimes", "must be one of"),
         (ENV_REASONING_EFFORT, "extreme", "must be one of"),
         (ENV_TURN_IDLE_TIMEOUT, "0", "greater than zero"),
         (ENV_TURN_IDLE_TIMEOUT, "NaN", "finite"),
@@ -129,14 +154,14 @@ def test_spawn_env_uses_spec_values_but_ambient_wins(
 ) -> None:
     from omnigent.community.harness.muse.plugin import build_spawn_env
 
-    monkeypatch.setenv(ENV_APPROVAL_MODE, "never")
+    monkeypatch.setenv(ENV_APPROVAL_MODE, "denyUnmatched")
     monkeypatch.setenv("ALLOWED_TOKEN", "secret")
     spec = SimpleNamespace(
         executor=SimpleNamespace(
             model="muse-large",
             reasoning_effort="medium",
             config={
-                "approval_mode": "always",
+                "approval_mode": "allowAll",
                 "turn_idle_timeout": 30,
                 "env_passthrough": ["ALLOWED_TOKEN"],
             },
@@ -163,7 +188,7 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
         _build_muse_executor,
     )
 
-    monkeypatch.setenv(ENV_APPROVAL_MODE, "never")
+    monkeypatch.setenv(ENV_APPROVAL_MODE, "denyUnmatched")
     monkeypatch.setenv(ENV_REASONING_EFFORT, "medium")
     monkeypatch.setenv(ENV_TURN_IDLE_TIMEOUT, "17")
     monkeypatch.setenv(ENV_ENV_PASSTHROUGH, "OPTED_IN")
@@ -171,14 +196,18 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
     executor = cast(MuseExecutor, _build_muse_executor())
     transport = cast(MspTransport, executor._transport_factory())
 
-    assert executor._approval_mode == "never"
+    assert executor._approval_mode == "denyUnmatched"
     assert executor._reasoning_effort == "medium"
     assert transport._idle_timeout == 17
     assert transport._env_passthrough == ("OPTED_IN",)
 
 
+@pytest.mark.parametrize(
+    "approval_mode",
+    ["allowAll", "promptUnmatched", "onRequest", "denyUnmatched"],
+)
 async def test_declarative_config_reaches_real_msp_session_and_turn(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, approval_mode: str
 ) -> None:
     from omnigent.community.harness.muse.inner.msp_client import MspClient
     from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
@@ -194,7 +223,7 @@ async def test_declarative_config_reaches_real_msp_session_and_turn(
             model="configured-model",
             reasoning_effort="high",
             config={
-                "approval_mode": "always",
+                "approval_mode": approval_mode,
                 "turn_idle_timeout": 19,
                 "env_passthrough": ["FAKE_MSP_LOG"],
             },
@@ -229,10 +258,8 @@ async def test_declarative_config_reaches_real_msp_session_and_turn(
     session = next(frame for frame in frames if frame.get("method") == "session/start")
     turn = next(frame for frame in frames if frame.get("method") == "turn/start")
     assert session["params"]["workspaceRoot"] == str(tmp_path)
-    assert session["params"]["approvalMode"] == "always"
+    assert session["params"]["approvalMode"] == approval_mode
     assert session["params"]["modelId"] == "configured-model"
     assert turn["params"]["reasoningEffort"] == "high"
-    assert turn["params"]["input"] == [
-        {"type": "text", "text": "Be concise.\n\nhello"}
-    ]
+    assert turn["params"]["input"] == [{"type": "text", "text": "Be concise.\n\nhello"}]
     assert any(isinstance(event, TurnComplete) for event in events)
