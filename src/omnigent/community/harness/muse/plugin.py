@@ -89,11 +89,12 @@ def get_contribution():
     )
 
 
-def build_spawn_env(spec, *, cwd=None) -> dict[str, str]:
+def build_spawn_env(spec, *, cwd=None, workdir=None) -> dict[str, str]:
     """Build the env-var dict the muse harness wrap reads at startup.
 
     Environment variables override declarative spec values. The harness process
-    validates the resulting values before it can spawn ``muse serve``.
+    validates the resulting values before it can spawn ``muse serve``. ``workdir``
+    is accepted for compatibility with Omnigent's spawn-env builder protocol.
     """
     env: dict[str, str] = {}
     model = getattr(getattr(spec, "executor", None), "model", None) or getattr(

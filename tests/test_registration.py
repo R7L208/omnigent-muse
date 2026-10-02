@@ -137,6 +137,16 @@ def test_build_spawn_env_returns_a_fresh_mapping():
     assert build_spawn_env(spec) == {"HARNESS_MUSE_MODEL": "muse-large"}
 
 
+def test_build_spawn_env_accepts_runner_workdir():
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    spec = SimpleNamespace(executor=SimpleNamespace(model="muse-large"))
+
+    assert build_spawn_env(spec, workdir=Path("/tmp/bundle")) == {
+        "HARNESS_MUSE_MODEL": "muse-large"
+    }
+
+
 def test_build_spawn_env_registers_all_runtime_options(monkeypatch):
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
