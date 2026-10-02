@@ -3,13 +3,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
-from omnigent.inner.executor import TurnComplete
+from omnigent.inner.executor import ExecutorError, TurnComplete
 
 from omnigent.community.harness.muse.inner.runtime_config import (
     DEFAULT_APPROVAL_MODE,
@@ -204,6 +205,80 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
     assert executor._reasoning_effort == "medium"
     assert transport._idle_timeout == 17
     assert transport._env_passthrough == ("OPTED_IN",)
+
+
+async def test_recovery_retains_non_default_runtime_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.community.harness.muse.inner import muse_harness
+    from omnigent.community.harness.muse.inner.muse_executor import (
+        MuseTransportError,
+        MuseTurnFinished,
+    )
+
+    transports: list[Any] = []
+
+    class RecoveryTransport:
+        def __init__(
+            self, *, idle_timeout: float, env_passthrough: tuple[str, ...]
+        ) -> None:
+            self.idle_timeout = idle_timeout
+            self.env_passthrough = env_passthrough
+            self.starts: list[dict[str, Any]] = []
+            self.turns: list[dict[str, Any]] = []
+            self.closed = False
+            transports.append(self)
+
+        async def start_session(self, **kwargs: Any) -> str:
+            self.starts.append(kwargs)
+            return f"session-{len(transports)}"
+
+        async def run_turn(
+            self,
+            session_id: str,
+            *,
+            text: str,
+            reasoning_effort: str | None,
+        ) -> AsyncIterator[Any]:
+            self.turns.append(
+                {
+                    "session_id": session_id,
+                    "text": text,
+                    "reasoning_effort": reasoning_effort,
+                }
+            )
+            if len(transports) == 1:
+                raise MuseTransportError(
+                    "host exited", retryable=True, transport_dead=True
+                )
+            yield MuseTurnFinished("turn-2", "completed")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setenv(ENV_APPROVAL_MODE, "denyUnmatched")
+    monkeypatch.setenv(ENV_REASONING_EFFORT, "ultra")
+    monkeypatch.setenv(ENV_TURN_IDLE_TIMEOUT, "17")
+    monkeypatch.setenv(ENV_ENV_PASSTHROUGH, "OPTED_IN")
+    monkeypatch.setattr(muse_harness, "MspTransport", RecoveryTransport)
+
+    executor = muse_harness._build_muse_executor()
+    turn = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [],
+        "system_prompt": "Be concise.",
+    }
+    first = [event async for event in executor.run_turn(**turn)]
+    second = [event async for event in executor.run_turn(**turn)]
+
+    assert len(transports) == 2
+    for transport in transports:
+        assert transport.idle_timeout == 17
+        assert transport.env_passthrough == ("OPTED_IN",)
+        assert transport.starts[0]["approval_mode"] == "denyUnmatched"
+        assert transport.turns[0]["reasoning_effort"] == "ultra"
+    assert isinstance(first[-1], ExecutorError)
+    assert isinstance(second[-1], TurnComplete)
 
 
 @pytest.mark.parametrize(
