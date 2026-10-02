@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -143,6 +144,20 @@ def test_unsandboxed_environment_allows_explicit_desktop_passthrough(
         (ENV_TURN_IDLE_TIMEOUT, "NaN", "finite"),
         (ENV_OS_ENV, "not-json", "valid JSON"),
         (ENV_OS_ENV, '"string"', "encode an object"),
+        (ENV_OS_ENV, json.dumps({"type": "container"}), r"\.type must be"),
+        (ENV_OS_ENV, json.dumps({"cwd": 42}), r"\.cwd must be"),
+        (ENV_OS_ENV, json.dumps({"fork": "false"}), r"\.fork must be a boolean"),
+        (
+            ENV_OS_ENV,
+            json.dumps({"start_in_scratch": 1}),
+            r"\.start_in_scratch must be a boolean",
+        ),
+        (ENV_OS_ENV, json.dumps({"sandbox": []}), r"\.sandbox must be"),
+        (
+            ENV_OS_ENV,
+            json.dumps({"sandbox": {"read_paths": "not-a-list"}}),
+            "is invalid",
+        ),
         (ENV_ENV_PASSTHROUGH, "GOOD,BAD-NAME", "invalid environment-variable"),
     ],
 )
@@ -154,12 +169,11 @@ def test_invalid_options_fail_before_transport_start(
         load_runtime_config()
 
 
-def test_spawn_env_uses_spec_values_but_ambient_wins(
+def test_spawn_env_uses_spec_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from omnigent.community.harness.muse.plugin import build_spawn_env
 
-    monkeypatch.setenv(ENV_APPROVAL_MODE, "denyUnmatched")
     monkeypatch.setenv("ALLOWED_TOKEN", "secret")
     spec = SimpleNamespace(
         executor=SimpleNamespace(
@@ -176,12 +190,50 @@ def test_spawn_env_uses_spec_values_but_ambient_wins(
     )
 
     env = build_spawn_env(spec)
-    assert ENV_APPROVAL_MODE not in env
+    assert env[ENV_APPROVAL_MODE] == "allowAll"
     assert env[ENV_REASONING_EFFORT] == "medium"
     assert env[ENV_TURN_IDLE_TIMEOUT] == "30"
     assert json.loads(env[ENV_OS_ENV])["sandbox"]["type"] == "none"
     assert env[ENV_ENV_PASSTHROUGH] == "ALLOWED_TOKEN"
     assert "ALLOWED_TOKEN" not in env
+
+
+@pytest.mark.parametrize(
+    "ambient_name",
+    [
+        "HARNESS_MUSE_MODEL",
+        "HARNESS_MUSE_CWD",
+        ENV_APPROVAL_MODE,
+        ENV_REASONING_EFFORT,
+        ENV_TURN_IDLE_TIMEOUT,
+        ENV_OS_ENV,
+        ENV_ENV_PASSTHROUGH,
+    ],
+)
+def test_ambient_environment_takes_precedence_over_each_spec_option(
+    monkeypatch: pytest.MonkeyPatch, ambient_name: str
+) -> None:
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    monkeypatch.setenv(ambient_name, "ambient-value")
+    spec = SimpleNamespace(
+        executor=SimpleNamespace(
+            model="spec-model",
+            reasoning_effort="high",
+            config={
+                "approval_mode": "allowAll",
+                "turn_idle_timeout": 30,
+                "env_passthrough": ["OPTED_IN"],
+            },
+        ),
+        model=None,
+        os_env=OSEnvSpec(sandbox=OSEnvSandboxSpec(type="none")),
+    )
+
+    env = build_spawn_env(spec, cwd=Path("/spec/workspace"))
+
+    assert ambient_name not in env
+    assert os.environ[ambient_name] == "ambient-value"
 
 
 def test_executor_factory_applies_validated_defaults_to_respawn_factory(

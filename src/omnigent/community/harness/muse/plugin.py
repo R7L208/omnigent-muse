@@ -100,8 +100,7 @@ def build_spawn_env(spec, *, cwd=None) -> dict[str, str]:
         spec, "model", None
     )
     _set_unless_ambient(env, "HARNESS_MUSE_MODEL", model)
-    if cwd is not None:
-        env["HARNESS_MUSE_CWD"] = str(cwd)
+    _set_unless_ambient(env, "HARNESS_MUSE_CWD", cwd)
     executor = getattr(spec, "executor", None)
     config = getattr(executor, "config", None)
     config = config if isinstance(config, dict) else {}
