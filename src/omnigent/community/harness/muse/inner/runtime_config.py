@@ -13,6 +13,7 @@ from omnigent.inner.datamodel import OSEnvSpec
 from omnigent.inner.os_env_serialization import decode_sandbox_spec
 
 ENV_APPROVAL_MODE = "HARNESS_MUSE_APPROVAL_MODE"
+ENV_PROVIDER = "HARNESS_MUSE_PROVIDER"
 ENV_REASONING_EFFORT = "HARNESS_MUSE_REASONING_EFFORT"
 ENV_TURN_IDLE_TIMEOUT = "HARNESS_MUSE_TURN_IDLE_TIMEOUT"
 ENV_OS_ENV = "HARNESS_MUSE_OS_ENV"
@@ -23,6 +24,7 @@ DEFAULT_TURN_IDLE_TIMEOUT = 300.0
 APPROVAL_MODES = frozenset(
     {"allowAll", "promptUnmatched", "onRequest", "denyUnmatched"}
 )
+PROVIDERS = frozenset({"echo", "local", "meta"})
 REASONING_EFFORTS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
@@ -34,6 +36,7 @@ class MuseRuntimeConfig:
     """Configuration resolved once, before ``muse serve`` can be spawned."""
 
     approval_mode: str = DEFAULT_APPROVAL_MODE
+    provider: str | None = None
     reasoning_effort: str | None = None
     turn_idle_timeout: float = DEFAULT_TURN_IDLE_TIMEOUT
     os_env: OSEnvSpec | None = None
@@ -133,6 +136,7 @@ def load_runtime_config() -> MuseRuntimeConfig:
     return MuseRuntimeConfig(
         approval_mode=_optional_choice(ENV_APPROVAL_MODE, APPROVAL_MODES)
         or DEFAULT_APPROVAL_MODE,
+        provider=_optional_choice(ENV_PROVIDER, PROVIDERS),
         reasoning_effort=_optional_choice(ENV_REASONING_EFFORT, REASONING_EFFORTS),
         turn_idle_timeout=_idle_timeout(),
         os_env=os_env,

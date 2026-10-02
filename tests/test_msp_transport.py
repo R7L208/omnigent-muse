@@ -202,6 +202,7 @@ async def test_respawn_retains_explicit_process_configuration(monkeypatch) -> No
         executable="/custom/muse",
         cwd="/custom/workspace",
         env=source_env,
+        provider="local",
         idle_timeout=12,
     )
     await transport._handle_error(MspConnectionClosed("dead"))
@@ -209,7 +210,7 @@ async def test_respawn_retains_explicit_process_configuration(monkeypatch) -> No
 
     assert len(calls) == 2
     for argv, kwargs in calls:
-        assert argv == ["/custom/muse", "serve"]
+        assert argv == ["/custom/muse", "serve", "--provider", "local"]
         assert kwargs["cwd"] == "/custom/workspace"
         assert kwargs["env"] == {"HOME": "/custom/home", "PATH": "/custom/bin"}
 
@@ -232,6 +233,20 @@ async def test_respawn_retains_explicit_environment_passthrough(monkeypatch) -> 
 
     assert calls[0]["env"] == {"HOME": "/home/test", "OPTED_IN": "yes"}
     assert calls[1]["env"] == calls[0]["env"]
+
+
+async def test_spawn_omits_provider_flag_when_not_configured(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        calls.append(list(argv))
+        return _ScriptedClient()
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(fake_spawn))
+    transport = await MspTransport.spawn(executable="/custom/muse")
+
+    assert calls == [["/custom/muse", "serve"]]
+    await transport.close()
 
 
 async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:

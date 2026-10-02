@@ -30,6 +30,7 @@ def _build_muse_executor() -> Executor:
         lambda: MspTransport(
             idle_timeout=config.turn_idle_timeout,
             env_passthrough=config.env_passthrough,
+            provider=config.provider,
         ),
         model=os.environ.get(_ENV_MODEL) or None,
         cwd=os.environ.get(_ENV_CWD)

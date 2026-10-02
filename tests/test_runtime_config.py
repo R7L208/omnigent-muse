@@ -19,6 +19,7 @@ from omnigent.community.harness.muse.inner.runtime_config import (
     ENV_APPROVAL_MODE,
     ENV_ENV_PASSTHROUGH,
     ENV_OS_ENV,
+    ENV_PROVIDER,
     ENV_REASONING_EFFORT,
     ENV_TURN_IDLE_TIMEOUT,
     load_runtime_config,
@@ -26,6 +27,7 @@ from omnigent.community.harness.muse.inner.runtime_config import (
 
 _CONFIG_ENV = (
     ENV_APPROVAL_MODE,
+    ENV_PROVIDER,
     ENV_REASONING_EFFORT,
     ENV_TURN_IDLE_TIMEOUT,
     ENV_OS_ENV,
@@ -42,6 +44,7 @@ def _clear_config(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_defaults_preserve_existing_behavior() -> None:
     config = load_runtime_config()
     assert config.approval_mode == DEFAULT_APPROVAL_MODE
+    assert config.provider is None
     assert config.reasoning_effort is None
     assert config.turn_idle_timeout == DEFAULT_TURN_IDLE_TIMEOUT
     assert config.os_env is None
@@ -54,6 +57,7 @@ def test_loads_all_runtime_options(monkeypatch: pytest.MonkeyPatch) -> None:
         sandbox=OSEnvSandboxSpec(type="none", env_passthrough=["FROM_OS_ENV"]),
     )
     monkeypatch.setenv(ENV_APPROVAL_MODE, "allowAll")
+    monkeypatch.setenv(ENV_PROVIDER, "echo")
     monkeypatch.setenv(ENV_REASONING_EFFORT, "high")
     monkeypatch.setenv(ENV_TURN_IDLE_TIMEOUT, "12.5")
     monkeypatch.setenv(ENV_OS_ENV, json.dumps(dataclasses.asdict(os_env)))
@@ -61,6 +65,7 @@ def test_loads_all_runtime_options(monkeypatch: pytest.MonkeyPatch) -> None:
 
     config = load_runtime_config()
     assert config.approval_mode == "allowAll"
+    assert config.provider == "echo"
     assert config.reasoning_effort == "high"
     assert config.turn_idle_timeout == 12.5
     assert config.os_env is not None and config.os_env.cwd == "/workspace"
@@ -89,6 +94,13 @@ def test_accepts_msp_approval_modes(
     monkeypatch.setenv(ENV_APPROVAL_MODE, approval_mode)
 
     assert load_runtime_config().approval_mode == approval_mode
+
+
+@pytest.mark.parametrize("provider", ["meta", "echo", "local"])
+def test_accepts_muse_providers(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+    monkeypatch.setenv(ENV_PROVIDER, provider)
+
+    assert load_runtime_config().provider == provider
 
 
 @pytest.mark.parametrize("approval_mode", ["always", "never", "sometimes"])
@@ -140,6 +152,7 @@ def test_unsandboxed_environment_allows_explicit_desktop_passthrough(
     ("name", "value", "message"),
     [
         (ENV_REASONING_EFFORT, "extreme", "must be one of"),
+        (ENV_PROVIDER, "unknown", "must be one of"),
         (ENV_TURN_IDLE_TIMEOUT, "0", "greater than zero"),
         (ENV_TURN_IDLE_TIMEOUT, "NaN", "finite"),
         (ENV_OS_ENV, "not-json", "valid JSON"),
@@ -181,6 +194,7 @@ def test_spawn_env_uses_spec_values(
             reasoning_effort="medium",
             config={
                 "approval_mode": "allowAll",
+                "provider": "echo",
                 "turn_idle_timeout": 30,
                 "env_passthrough": ["ALLOWED_TOKEN"],
             },
@@ -191,6 +205,7 @@ def test_spawn_env_uses_spec_values(
 
     env = build_spawn_env(spec)
     assert env[ENV_APPROVAL_MODE] == "allowAll"
+    assert env[ENV_PROVIDER] == "echo"
     assert env[ENV_REASONING_EFFORT] == "medium"
     assert env[ENV_TURN_IDLE_TIMEOUT] == "30"
     assert json.loads(env[ENV_OS_ENV])["sandbox"]["type"] == "none"
@@ -204,6 +219,7 @@ def test_spawn_env_uses_spec_values(
         "HARNESS_MUSE_MODEL",
         "HARNESS_MUSE_CWD",
         ENV_APPROVAL_MODE,
+        ENV_PROVIDER,
         ENV_REASONING_EFFORT,
         ENV_TURN_IDLE_TIMEOUT,
         ENV_OS_ENV,
@@ -222,6 +238,7 @@ def test_ambient_environment_takes_precedence_over_each_spec_option(
             reasoning_effort="high",
             config={
                 "approval_mode": "allowAll",
+                "provider": "echo",
                 "turn_idle_timeout": 30,
                 "env_passthrough": ["OPTED_IN"],
             },
@@ -246,6 +263,7 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
     )
 
     monkeypatch.setenv(ENV_APPROVAL_MODE, "denyUnmatched")
+    monkeypatch.setenv(ENV_PROVIDER, "local")
     monkeypatch.setenv(ENV_REASONING_EFFORT, "medium")
     monkeypatch.setenv(ENV_TURN_IDLE_TIMEOUT, "17")
     monkeypatch.setenv(ENV_ENV_PASSTHROUGH, "OPTED_IN")
@@ -257,6 +275,7 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
     assert executor._reasoning_effort == "medium"
     assert transport._idle_timeout == 17
     assert transport._env_passthrough == ("OPTED_IN",)
+    assert transport._provider == "local"
 
 
 async def test_recovery_retains_non_default_runtime_configuration(
@@ -272,10 +291,15 @@ async def test_recovery_retains_non_default_runtime_configuration(
 
     class RecoveryTransport:
         def __init__(
-            self, *, idle_timeout: float, env_passthrough: tuple[str, ...]
+            self,
+            *,
+            idle_timeout: float,
+            env_passthrough: tuple[str, ...],
+            provider: str | None,
         ) -> None:
             self.idle_timeout = idle_timeout
             self.env_passthrough = env_passthrough
+            self.provider = provider
             self.starts: list[dict[str, Any]] = []
             self.turns: list[dict[str, Any]] = []
             self.closed = False
@@ -309,6 +333,7 @@ async def test_recovery_retains_non_default_runtime_configuration(
             self.closed = True
 
     monkeypatch.setenv(ENV_APPROVAL_MODE, "denyUnmatched")
+    monkeypatch.setenv(ENV_PROVIDER, "local")
     monkeypatch.setenv(ENV_REASONING_EFFORT, "ultra")
     monkeypatch.setenv(ENV_TURN_IDLE_TIMEOUT, "17")
     monkeypatch.setenv(ENV_ENV_PASSTHROUGH, "OPTED_IN")
@@ -327,6 +352,7 @@ async def test_recovery_retains_non_default_runtime_configuration(
     for transport in transports:
         assert transport.idle_timeout == 17
         assert transport.env_passthrough == ("OPTED_IN",)
+        assert transport.provider == "local"
         assert transport.starts[0]["approval_mode"] == "denyUnmatched"
         assert transport.turns[0]["reasoning_effort"] == "ultra"
     assert isinstance(first[-1], ExecutorError)
@@ -365,6 +391,7 @@ async def test_declarative_config_reaches_real_msp_session_and_turn(
             reasoning_effort=reasoning_effort,
             config={
                 "approval_mode": approval_mode,
+                "provider": "echo",
                 "turn_idle_timeout": 19,
                 "env_passthrough": ["FAKE_MSP_LOG"],
             },
@@ -378,7 +405,10 @@ async def test_declarative_config_reaches_real_msp_session_and_turn(
     real_spawn = MspClient.spawn
     fake_host = Path(__file__).parent / "fixtures" / "fake_msp_host.py"
 
-    async def spawn_fake_host(_argv: object, **kwargs: Any) -> MspClient:
+    spawn_argv: list[str] = []
+
+    async def spawn_fake_host(argv: object, **kwargs: Any) -> MspClient:
+        spawn_argv.extend(cast(list[str], argv))
         return await real_spawn([sys.executable, str(fake_host)], **kwargs)
 
     monkeypatch.setattr(MspClient, "spawn", staticmethod(spawn_fake_host))
@@ -399,6 +429,7 @@ async def test_declarative_config_reaches_real_msp_session_and_turn(
     session = next(frame for frame in frames if frame.get("method") == "session/start")
     turn = next(frame for frame in frames if frame.get("method") == "turn/start")
     assert session["params"]["workspaceRoot"] == str(tmp_path)
+    assert spawn_argv[-2:] == ["--provider", "echo"]
     assert session["params"]["approvalMode"] == approval_mode
     assert session["params"]["modelId"] == "configured-model"
     assert turn["params"]["reasoningEffort"] == reasoning_effort

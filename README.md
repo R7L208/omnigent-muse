@@ -57,6 +57,7 @@ executor:
   reasoning_effort: high          # none, minimal, low, medium, high, xhigh, max, ultra
   config:
     harness: muse
+    provider: meta                  # meta, echo, local
     approval_mode: onRequest       # allowAll, promptUnmatched, onRequest, denyUnmatched
     turn_idle_timeout: 300         # seconds; finite and greater than zero
     env_passthrough: [GITHUB_TOKEN]
@@ -68,13 +69,18 @@ os_env:
 ```
 
 The corresponding harness-process variables are
-`HARNESS_MUSE_APPROVAL_MODE`, `HARNESS_MUSE_REASONING_EFFORT`,
+`HARNESS_MUSE_PROVIDER`, `HARNESS_MUSE_APPROVAL_MODE`, `HARNESS_MUSE_REASONING_EFFORT`,
 `HARNESS_MUSE_TURN_IDLE_TIMEOUT`, `HARNESS_MUSE_OS_ENV` (JSON), and
 `HARNESS_MUSE_ENV_PASSTHROUGH` (comma-separated names). Invalid values fail
 before `muse serve` starts. Passthrough is exact-name and deny-by-default:
 variables not in the shared safe base or either explicit passthrough list are
 not inherited by Muse. The resolved timeout and allowlist are retained by the
 transport factory and therefore also apply after a transport respawn.
+
+When `provider` is omitted, Muse uses its configured provider or its `meta`
+default. The `echo` provider is credential-free and useful for transport smoke
+tests; `meta` requires Muse-owned authentication through `muse login`,
+`muse auth set`, or `META_API_KEY`.
 
 `OSEnvSpec` is accepted and validated here, including its sandbox environment
 allowlist. Process-tree sandbox enforcement is tracked separately in issue #6.

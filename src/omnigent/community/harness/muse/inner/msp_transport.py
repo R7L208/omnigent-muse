@@ -70,6 +70,7 @@ class MspTransport:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         env_passthrough: Sequence[str] = (),
+        provider: str | None = None,
         idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
     ) -> None:
         if idle_timeout <= 0:
@@ -79,6 +80,7 @@ class MspTransport:
         self._cwd = cwd
         self._env = env
         self._env_passthrough = tuple(env_passthrough)
+        self._provider = provider
         self._idle_timeout = idle_timeout
         self._approval_requirements: dict[tuple[str, str], JsonObject] = {}
         self._item_kinds: dict[str, str] = {}
@@ -91,11 +93,15 @@ class MspTransport:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         env_passthrough: Sequence[str] = (),
+        provider: str | None = None,
         idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
     ) -> MspTransport:
         binary = executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
+        argv = [binary, "serve"]
+        if provider is not None:
+            argv.extend(("--provider", provider))
         client = await MspClient.spawn(
-            [binary, "serve"],
+            argv,
             cwd=cwd,
             env=clean_agent_env(extra_allowed=env_passthrough, source=env),
             client_version=_package_version(),
@@ -107,14 +113,18 @@ class MspTransport:
             cwd=cwd,
             env=env,
             env_passthrough=env_passthrough,
+            provider=provider,
             idle_timeout=idle_timeout,
         )
 
     async def _get_client(self) -> MspClient:
         if self._client is None:
             binary = self._executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
+            argv = [binary, "serve"]
+            if self._provider is not None:
+                argv.extend(("--provider", self._provider))
             self._client = await MspClient.spawn(
-                [binary, "serve"],
+                argv,
                 cwd=self._cwd,
                 env=clean_agent_env(
                     extra_allowed=self._env_passthrough, source=self._env

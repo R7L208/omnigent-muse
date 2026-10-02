@@ -105,6 +105,7 @@ def build_spawn_env(spec, *, cwd=None) -> dict[str, str]:
     config = getattr(executor, "config", None)
     config = config if isinstance(config, dict) else {}
     _set_unless_ambient(env, "HARNESS_MUSE_APPROVAL_MODE", config.get("approval_mode"))
+    _set_unless_ambient(env, "HARNESS_MUSE_PROVIDER", config.get("provider"))
     reasoning_effort = getattr(executor, "reasoning_effort", None)
     _set_unless_ambient(env, "HARNESS_MUSE_REASONING_EFFORT", reasoning_effort)
     _set_unless_ambient(
