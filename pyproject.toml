@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"          # match omnigent (the Muse SDK itself is 3.10+)
 license = "MIT"
 dependencies = [
-  "omnigent>=0.11.0.dev0,<1",       # pin to the core version you build against
+  "omnigent>=0.15.0,<1",            # first release with all imported harness APIs
 ]
 
 [dependency-groups]

@@ -54,10 +54,10 @@ override the spec; per-turn model and reasoning-effort values override both.
 executor:
   type: omnigent
   model: muse-large
-  reasoning_effort: high
+  reasoning_effort: high          # none, minimal, low, medium, high, xhigh, max, ultra
   config:
     harness: muse
-    approval_mode: onRequest       # onRequest, always, or never
+    approval_mode: onRequest       # allowAll, promptUnmatched, onRequest, denyUnmatched
     turn_idle_timeout: 300         # seconds; finite and greater than zero
     env_passthrough: [GITHUB_TOKEN]
 os_env:

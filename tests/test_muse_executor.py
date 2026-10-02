@@ -214,7 +214,7 @@ async def test_rejects_invalid_per_turn_reasoning_effort_before_sending_prompt()
     assert transport.turns == []
 
 
-async def test_forwards_openai_minimal_per_turn_reasoning_effort() -> None:
+async def test_forwards_minimal_per_turn_reasoning_effort() -> None:
     transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
 
     await collect(
