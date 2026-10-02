@@ -87,4 +87,4 @@ allowlist. Process-tree sandbox enforcement is tracked separately in issue #6.
 
 ## License
 
-MIT.
+Apache-2.0.
