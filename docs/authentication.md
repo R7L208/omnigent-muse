@@ -1,290 +1,166 @@
-# Muse Provider Authentication Setup
+# Muse provider authentication
 
-This guide explains how to set up authentication for the Omnigent Muse harness. The harness delegates authentication to Muse, which supports multiple providers with different authentication requirements.
+The Muse harness does not store or manage credentials. Authentication is owned
+by Muse: the harness starts `muse serve`, and Muse authenticates with whichever
+provider the session uses. This page covers how provider selection affects
+authentication, how to prepare a Muse installation before running the harness,
+and how to read the harness's authentication errors.
 
-## Supported Providers
+## Providers
 
-The Muse harness supports three providers, each with distinct authentication characteristics:
+| Provider | Credentials | Use it for |
+|----------|-------------|------------|
+| `meta`   | Required (Muse-owned) | Real model calls. Muse's default when no provider is configured. |
+| `echo`   | None | Credential-free transport checks: MSP handshake, streaming, and event translation without a model. |
+| `local`  | Depends on your local Muse setup | Models configured locally in Muse. See the [Muse Code documentation](https://meta-models.github.io/muse-code-sdk/). |
 
-### Meta Provider
+### Selecting a provider
 
-The **`meta`** provider routes model calls to Meta's Model API. It requires authentication credentials.
-
-**Setup steps:**
-
-1. **Install Muse**: Ensure you have the Muse CLI installed.
-   ```sh
-   curl -fsSL https://dev.meta.ai/install.sh | bash
-   ```
-
-2. **Authenticate** using one of these approaches (in order of precedence):
-   
-   a. **Using `muse login` (interactive authentication):**
-   ```sh
-   muse login
-   ```
-   Follow the prompts to authenticate. Credentials are stored securely in Muse's auth store.
-   
-   **Recommended**: This method is the most secure for local development because credentials are managed by Muse and not exposed in shell history or command-line arguments.
-
-   b. **Using Muse's credential management for programmatic access:**
-   
-   Muse provides secure credential storage that can be configured via its CLI. Refer to the Muse documentation for the exact command syntax to store API keys securely without exposing them in command-line arguments or shell history.
-   
-   c. **Using the `META_API_KEY` environment variable (CI/CD environments):**
-   
-   For CI/CD systems, set the `META_API_KEY` environment variable from a secure secret manager (e.g., GitHub Secrets, GitLab CI/CD variables). **Never hardcode credentials or use shell export commands with literal keys**, as this exposes them in shell history and logs.
-   
-   Example (GitHub Actions):
-   ```yaml
-   env:
-     META_API_KEY: ${{ secrets.META_API_KEY }}
-   ```
-
-3. **Precedence order**: Muse checks credentials in this order:
-   - `META_API_KEY` environment variable (if set in the harness process)
-   - Stored credential from Muse's credential store (configured via `muse login` or programmatic credential management)
-   - Fall back to default provider if neither is available
-
-**Security best practices:**
-- **Never** pass credentials as command-line arguments (they appear in process listings and shell history).
-- **Never** hardcode credentials in agent specifications, environment exports, or config files.
-- Use `muse login` for interactive authentication in local development.
-- Use secure secret managers (CI/CD variables, HashiCorp Vault, etc.) for automated deployments.
-
-### Echo Provider
-
-The **`echo`** provider is credential-free and designed for testing the MSP transport layer without connecting to any model API. It echoes back mock responses.
-
-**Use cases:**
-- Verifying the MSP connection between the harness and Muse
-- Transport smoke tests to confirm the integration is wired correctly
-- Development and testing workflows
-
-**Setup:** No authentication required. Simply declare `provider: echo` in your agent spec or set the environment variable:
-```sh
-export HARNESS_MUSE_PROVIDER=echo
-```
-
-**Example verification:**
-```yaml
-executor:
-  type: omnigent
-  harness: muse
-  model: echo
-  config:
-    provider: echo
-```
-
-### Local Provider
-
-The **`local`** provider routes model calls to a local model instance available on your machine. Authentication requirements depend on your local setup.
-
-**Setup:** Configure your local model provider according to Muse's `local` provider documentation, then declare it in your agent spec:
-```yaml
-executor:
-  type: omnigent
-  config:
-    provider: local
-```
-
-**Note:** Specific authentication steps for the `local` provider depend on your local model configuration. Refer to the Muse documentation for details on configuring local model endpoints.
-
-## Provider Configuration
-
-### Via Agent Specification
-
-Declare the provider in your Omnigent agent YAML:
+Set the provider on the agent spec, or override it for the harness process with
+`HARNESS_MUSE_PROVIDER` (environment variables override the spec):
 
 ```yaml
 executor:
   type: omnigent
-  harness: muse
-  model: muse-large           # or appropriate model for your provider
   config:
-    provider: meta            # or echo, local
+    harness: muse
+    provider: meta                # meta, echo, local
 ```
 
-### Via Environment Variables
+When a provider is configured, the harness passes it to `muse serve` as
+`--provider`. When it is omitted, Muse uses its configured provider or its
+`meta` default.
 
-Override spec-declared values with environment variables (takes precedence):
+## Setting up `meta`
+
+Install Muse (`curl -fsSL https://dev.meta.ai/install.sh | bash`), then
+authenticate Muse with one of:
+
+- **`muse login`**: interactive device-code login; Muse stores the credential.
+  This is the simplest option on a workstation. Run it as the same user the
+  harness runs as. A running `muse serve` host picks up a login completed later
+  on its next session start, resume, or fork.
+- **`muse auth set`**: stores a credential in Muse's auth store without an
+  interactive login. See `muse --help` for its usage on your Muse version,
+  and prefer a form that does not put the key on the command line.
+- **`META_API_KEY`**: for unattended environments such as CI. Two things are
+  required:
+  1. Inject the value from a secret manager or CI secret, never as a literal
+     in a script, spec, or shell command:
+
+     ```yaml
+     # GitHub Actions
+     env:
+       META_API_KEY: ${{ secrets.META_API_KEY }}
+     ```
+
+  2. Allow it through to Muse. The harness launches `muse serve` with a
+     deny-by-default environment, so `META_API_KEY` is dropped unless it is
+     listed for passthrough:
+
+     ```yaml
+     executor:
+       config:
+         harness: muse
+         provider: meta
+         env_passthrough: [META_API_KEY]
+     ```
+
+     `HARNESS_MUSE_ENV_PASSTHROUGH=META_API_KEY` and
+     `os_env.sandbox.env_passthrough` work too.
+
+## Verifying readiness
+
+None of these start an Omnigent workload.
 
 ```sh
-export HARNESS_MUSE_PROVIDER=meta
-```
-
-The `HARNESS_MUSE_PROVIDER` environment variable accepts: `meta`, `echo`, or `local`.
-
-### Default Behavior
-
-If `provider` is omitted in both the spec and environment:
-- The harness uses Muse's configured default provider
-- Muse's default is typically `meta`
-
-## Verification Workflow
-
-Before running a full Omnigent workload, verify that your provider and authentication are correctly configured.
-
-### 1. Verify Muse is installed
-
-```sh
+# Muse is installed and on PATH (or set OMNIGENT_MUSE_PATH)
 muse --version
-```
 
-Check that the Muse CLI is on your PATH and working. Expected output: version information (e.g., `muse 1.4.0`).
-
-### 2. Verify the harness can load the Muse plugin
-
-```sh
-python -c "from omnigent.harness_plugins import valid_harnesses; assert 'muse' in valid_harnesses(); print('Muse harness discovered')"
-```
-
-This confirms that the Omnigent Muse harness plugin is discoverable. If this fails, verify that you have installed the omnigent-muse package correctly.
-
-### 3. Check Muse configuration and credentials
-
-Run Muse's own verification commands to confirm your provider and authentication are set up:
-
-```sh
+# Muse's own commands, including authentication, for your version
 muse --help
+
+# The harness is discoverable by Omnigent
+python -c "from omnigent.harness_plugins import valid_harnesses; assert 'muse' in valid_harnesses(); print('ok')"
+python -c "from omnigent.harness_plugins import plugin_state; print(plugin_state().load_errors)"  # {}
 ```
 
-Review Muse's help output for commands that verify your authentication status and provider configuration. The specific commands depend on your Muse version.
+To separate transport problems from authentication problems, run your agent
+once with `provider: echo`. If `echo` works and `meta` does not, the transport
+is healthy and the issue is Muse authentication.
 
-**For meta provider**: If you've run `muse login`, Muse stores credentials in its configured auth location (typically `~/.config/muse/auth.json`). Muse provides commands to verify this configuration — check the help output or Muse documentation for the exact command syntax.
+## Troubleshooting
 
-**For echo provider**: The echo provider is credential-free. If Muse is installed and the echo provider is available, it should work without additional setup.
+### `authRequired` after a successful connection
 
-### 4. Test in a non-workload context (optional)
+A missing or expired credential does not fail the MSP handshake. `muse serve`
+starts, the harness connects, and a session starts. The failure appears when
+the first turn reaches the model, as a terminal turn failure. This is an
+authentication problem, not a transport problem. The harness keeps the
+session rather than tearing down the connection. After fixing the credential,
+retry; if the error persists, start a new session. A changed `META_API_KEY`
+only takes effect once the harness process restarts with it.
 
-Once Muse verification succeeds, you can optionally test your chosen provider in isolation (outside of an Omnigent workload). Refer to the Muse documentation for examples of running Muse commands with your chosen provider.
+The harness reports it as:
 
-**Avoid**: Do not start full Omnigent workloads yet if auth verification failed, as `authRequired` errors will surface as terminal turn failures after the MSP connection initializes (see troubleshooting below).
-
-## Troubleshooting Authentication Failures
-
-### `authRequired` Error After Successful MSP Connection
-
-The most common authentication issue is `authRequired` arriving as a **terminal turn failure** after the MSP connection initializes successfully. This can be misleading because:
-
-1. The MSP connection (stdio-based) initializes correctly
-2. The first turn starts without apparent transport errors
-3. The error surfaces only after Muse attempts to call the model API
-
-This is **not a transport problem** — it indicates the selected provider cannot authenticate. Verify your setup using the **verification workflow** above.
-
-### Common Auth Failures and Solutions
-
-#### Meta Provider Authentication Failed
-
-**Exact Message:**
 ```
-Muse provider authentication failed (provider=meta, authRequired). Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment.
+Muse provider authentication failed (provider=<provider>, authRequired). <hint>
 ```
 
-*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:431 (via STRINGS-13.md)*
+`<provider>` is the provider Muse reported for the session. If Muse did not
+report one, it is the configured provider, and `unknown` if neither is
+available. Messages never include credential values.
 
-- **Solution**: 
-  1. Run `muse login` to authenticate interactively in your browser. This is the recommended method for local development.
-  2. Alternatively, consult Muse documentation for the correct syntax to use `muse auth set` to store credentials securely without exposing them in command-line arguments.
-  3. For CI/CD environments, set `META_API_KEY` as an environment variable from a secure secret manager (not as a literal value in code or shell commands).
-  
-  **Example for CI/CD (GitHub Actions):**
-  ```yaml
-  env:
-    META_API_KEY: ${{ secrets.META_API_KEY }}
-  ```
+#### `meta`
 
-#### Echo Provider Authentication Failed
+```
+Muse provider authentication failed (provider=meta, authRequired). Run `muse login` or `muse auth set`, or set META_API_KEY and add it to executor.config.env_passthrough.
+```
 
-**Exact Message:**
+Authenticate Muse as described in [Setting up `meta`](#setting-up-meta). If you
+rely on `META_API_KEY`, check that it is set in the harness process *and*
+listed in `env_passthrough`.
+
+#### Provider mismatch
+
+```
+Muse provider authentication failed (provider=<active>, authRequired). Muse used provider <active> but the harness is configured for <configured>; check executor.config.provider / HARNESS_MUSE_PROVIDER and Muse's default provider.
+```
+
+Muse ran the session with a different provider than the harness was configured
+for. Check `executor.config.provider` and `HARNESS_MUSE_PROVIDER` (the
+environment variable wins), and Muse's own default provider.
+
+#### `echo`
+
 ```
 Muse provider authentication failed (provider=echo, authRequired). Echo provider requires no credentials. Verify configuration and try again.
 ```
 
-*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:429 (via STRINGS-13.md)*
+`echo` never needs credentials, so this points at configuration rather than
+login. Do not run `muse login` for it. Check the provider settings above.
 
-- **Cause**: Echo provider configuration is incorrect or the provider is not properly initialized.
-- **Solution**: Verify that `HARNESS_MUSE_PROVIDER=echo` is set and that `muse` is running with the `--provider echo` flag. The echo provider should not require credentials.
+#### `local` or unknown provider
 
-#### Unknown Provider Authentication Failed
-
-**Exact Message:**
 ```
+Muse provider authentication failed (provider=local, authRequired). Check your Muse credentials and provider configuration.
 Muse provider authentication failed (provider=unknown, authRequired). Check your Muse credentials and provider configuration.
 ```
 
-*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:441 (via STRINGS-13.md)*
+Check the provider's setup in Muse. For `unknown`, set `provider` explicitly so
+the harness and Muse agree on which provider to use.
 
-- **Cause**: The provider could not be determined (e.g., `HARNESS_MUSE_PROVIDER` is not set, Muse's config is corrupted, or no provider is configured).
-- **Solution**: Verify that `~/.config/muse/settings.json` exists and is valid JSON. Explicitly set the provider:
-  ```sh
-  export HARNESS_MUSE_PROVIDER=meta  # or echo, local
-  ```
-  Then check Muse's configuration documentation for your chosen provider.
+### Debugging provider calls
 
-#### Local Provider Authentication Failed
+`MUSE_TRANSPORT_TRACE=1` makes Muse print raw provider request and response
+lines to stderr; Muse scrubs credentials from this output. Like any variable,
+it must be listed in `env_passthrough` to reach `muse serve`. Use it only while
+debugging, and treat the output as sensitive.
 
-**Exact Message:**
-```
-Muse provider authentication failed (provider=local, authRequired). Check your Muse credentials and provider configuration.
-```
+## Keeping credentials safe
 
-*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:441 (via STRINGS-13.md)*
-
-- **Cause**: Local provider authentication is failing, typically due to misconfigured credentials or local model endpoint not being available.
-- **Solution**: Verify your local model provider setup according to Muse documentation, then retry.
-
-#### Authentication Works Locally but Fails in CI/CD
-
-- **Cause**: The `META_API_KEY` environment variable is not set in the CI/CD environment, and Muse's credential store (local to your machine) is not available in the CI/CD container/runner.
-- **Solution**: Set `META_API_KEY` in your CI/CD environment variables from a secure secret manager. 
-  
-  **Example (GitHub Actions):**
-  ```yaml
-  env:
-    META_API_KEY: ${{ secrets.META_API_KEY }}
-  ```
-  
-  **Example (GitLab CI/CD):**
-  ```yaml
-  variables:
-    META_API_KEY: $CI_JOB_TOKEN  # or configure via CI/CD settings
-  ```
-  
-  **Important**: Never hardcode credentials or use plain `export` commands in CI/CD scripts. Use the CI/CD platform's secure secret management system.
-
-#### Provider Mismatch
-
-- **Cause**: The provider configured in the agent spec differs from the active provider in Muse or from what Muse expects based on credentials available.
-- **Example**: Spec declares `provider: echo` but Muse is configured for `provider: meta` and `META_API_KEY` is set.
-- **Solution**: Ensure the spec's `provider` value matches your Muse configuration and available credentials, or let the spec omit `provider` to use Muse's default.
-
-### Debug Trace
-
-For troubleshooting provider issues, enable tracing to see detailed provider interactions:
-
-```sh
-export MUSE_TRANSPORT_TRACE=1
-```
-
-Consult Muse documentation for details on what this trace output includes and how to use it safely in a debug context.
-
-## Security Best Practices
-
-1. **Never embed credentials in YAML specs**: Always use environment variables or Muse's credential storage.
-2. **Never pass credentials as command-line arguments**: They appear in process listings (`ps`), shell history, and logs.
-3. **Use `META_API_KEY` only in trusted environments**: The environment variable is visible to the harness process and should only be used in secure, automated deployments (CI/CD systems with secret management).
-4. **Use `muse login` for interactive authentication**: For local development, `muse login` is the most secure approach.
-5. **Verify your logging pipeline**: Ensure that `META_API_KEY` environment variable values are not captured in logs or configuration artifacts.
-
-## Next Steps
-
-Once you have verified your provider authentication:
-
-1. Declare the provider in your Omnigent agent spec
-2. Start your Omnigent workload
-3. Monitor the first turn for authentication errors (which surface as terminal events, not transport errors)
-4. If `authRequired` appears, revisit the **troubleshooting** section above
-
-For more information on Muse and its providers, visit the [Muse Code documentation](https://meta-models.github.io/muse-code-sdk/).
+- Never put credentials in agent specs, command-line arguments, or committed
+  files.
+- Prefer `muse login` on workstations and CI secrets for `META_API_KEY`.
+- Pass through only the variables Muse needs. Passthrough is exact-name and
+  deny-by-default for that reason.
