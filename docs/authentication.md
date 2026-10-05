@@ -172,9 +172,16 @@ This is **not a transport problem** — it indicates the selected provider canno
 
 ### Common Auth Failures and Solutions
 
-**"Muse provider authentication failed (provider=meta, authRequired)"**
+#### Meta Provider Authentication Failed
 
-- **Solution for meta provider**: Run one of:
+**Exact Message:**
+```
+Muse provider authentication failed (provider=meta, authRequired). Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment.
+```
+
+*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:413-414*
+
+- **Solution**: Use one of these approaches:
   ```sh
   muse login
   ```
@@ -187,12 +194,47 @@ This is **not a transport problem** — it indicates the selected provider canno
   export META_API_KEY=<your-meta-api-key>
   ```
 
-**"Muse provider authentication failed (provider=unknown, authRequired)"**
+#### Echo Provider Authentication Failed
 
-- **Cause**: The provider could not be determined (e.g., Muse's config is corrupted or no provider is configured).
-- **Solution**: Verify that `~/.config/muse/settings.json` exists and is valid JSON. Check Muse's configuration documentation.
+**Exact Message:**
+```
+Muse provider authentication failed (provider=echo, authRequired). Echo provider requires no credentials. Verify configuration and try again.
+```
 
-**Authentication works locally but fails in CI/CD**
+*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:410-412*
+
+- **Cause**: Echo provider configuration is incorrect or the provider is not properly initialized.
+- **Solution**: Verify that `HARNESS_MUSE_PROVIDER=echo` is set and that `muse` is running with the `--provider echo` flag. The echo provider should not require credentials.
+
+#### Unknown Provider Authentication Failed
+
+**Exact Message:**
+```
+Muse provider authentication failed (provider=unknown, authRequired). Check your Muse credentials and provider configuration.
+```
+
+*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:407, 415-417*
+
+- **Cause**: The provider could not be determined (e.g., `HARNESS_MUSE_PROVIDER` is not set, Muse's config is corrupted, or no provider is configured).
+- **Solution**: Verify that `~/.config/muse/settings.json` exists and is valid JSON. Explicitly set the provider:
+  ```sh
+  export HARNESS_MUSE_PROVIDER=meta  # or echo, local
+  ```
+  Then check Muse's configuration documentation for your chosen provider.
+
+#### Local Provider Authentication Failed
+
+**Exact Message:**
+```
+Muse provider authentication failed (provider=local, authRequired). Check your Muse credentials and provider configuration.
+```
+
+*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:415-417*
+
+- **Cause**: Local provider authentication is failing, typically due to misconfigured credentials or local model endpoint not being available.
+- **Solution**: Verify your local model provider setup according to Muse documentation, then retry.
+
+#### Authentication Works Locally but Fails in CI/CD
 
 - **Cause**: The `META_API_KEY` environment variable is not set in the CI/CD environment, and Muse's credential store (local to your machine) is not available in the CI/CD container/runner.
 - **Solution**: Set `META_API_KEY` in your CI/CD environment variables:
@@ -200,11 +242,11 @@ This is **not a transport problem** — it indicates the selected provider canno
   export META_API_KEY=${{ secrets.META_API_KEY }}  # GitHub Actions example
   ```
 
-**Provider mismatch error**
+#### Provider Mismatch
 
-- **Cause**: The provider configured in the agent spec differs from the active provider in Muse.
-- **Example**: Spec declares `provider: echo` but Muse is configured for `provider: meta`.
-- **Solution**: Ensure the spec's `provider` value matches your Muse configuration, or let the spec omit `provider` to use Muse's default.
+- **Cause**: The provider configured in the agent spec differs from the active provider in Muse or from what Muse expects based on credentials available.
+- **Example**: Spec declares `provider: echo` but Muse is configured for `provider: meta` and `META_API_KEY` is set.
+- **Solution**: Ensure the spec's `provider` value matches your Muse configuration and available credentials, or let the spec omit `provider` to use Muse's default.
 
 ### Debug Trace
 
