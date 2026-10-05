@@ -257,6 +257,7 @@ async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:
             model="fake-model",
             approval_mode="onRequest",
         )
+        assert transport.active_provider == "echo"
         events = [
             event
             async for event in transport.run_turn(

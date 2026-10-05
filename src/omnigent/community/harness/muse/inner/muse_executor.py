@@ -116,6 +116,9 @@ class MuseTransportError(Exception):
 
 
 class MuseTransport(Protocol):
+    @property
+    def active_provider(self) -> str | None: ...
+
     async def start_session(
         self,
         *,
@@ -169,7 +172,7 @@ class MuseExecutor(Executor):
         self._approval_mode = approval_mode
         self._reasoning_effort = reasoning_effort
         self._provider = provider
-        self._active_provider: str | None = None  # Captured from session providerId
+        self._active_provider: str | None = None
         self._transport: MuseTransport | None = None
         self._session_id: str | None = None
         self._active_turn_id: str | None = None
@@ -216,12 +219,14 @@ class MuseExecutor(Executor):
             raise
         self._transport = transport
         self._session_id = session_id
+        self._active_provider = transport.active_provider
         self._model = model
         return session_id
 
     async def _discard_transport(self) -> None:
         transport, self._transport = self._transport, None
         self._session_id = None
+        self._active_provider = None
         self._active_turn_id = None
         self._system_prompt_sent = False
         self._needs_replay = True
@@ -409,7 +414,7 @@ class MuseExecutor(Executor):
 
         Provider resolution (per CONTRACT § 3):
         - self._active_provider: active provider from session providerId
-        - self._provider: configured provider from HARNESS_MUSE_PROVIDER environment
+        - self._provider: configured provider (executor.config.provider / HARNESS_MUSE_PROVIDER)
         - "unknown": when neither active nor configured provider is available
 
         Mismatch detection: when active and configured providers both exist and differ,

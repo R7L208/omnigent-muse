@@ -84,6 +84,7 @@ class MspTransport:
         self._idle_timeout = idle_timeout
         self._approval_requirements: dict[tuple[str, str], JsonObject] = {}
         self._item_kinds: dict[str, str] = {}
+        self._active_provider: str | None = None
 
     @classmethod
     async def spawn(
@@ -134,6 +135,11 @@ class MspTransport:
             )
         return self._client
 
+    @property
+    def active_provider(self) -> str | None:
+        """Provider Muse reported for the current session, if any."""
+        return self._active_provider
+
     async def start_session(
         self,
         *,
@@ -151,6 +157,8 @@ class MspTransport:
             session_id = _first_str(session.get("sessionId"), session.get("id"))
             if session_id is None:
                 raise MspProtocolError("session/start returned no session id")
+            # Nullable in MSP: a logged-out host may not have resolved a provider.
+            self._active_provider = _first_str(session.get("providerId"))
             return session_id
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
             raise await self._handle_error(exc) from exc

@@ -41,6 +41,7 @@ class FakeTransport:
         self.decisions: list[tuple[str, str, str]] = []
         self.interrupts: list[tuple[str, str | None]] = []
         self.closed = False
+        self.active_provider: str | None = None
 
     async def start_session(self, **kwargs: Any) -> str:
         self.starts.append(kwargs)
@@ -1082,15 +1083,41 @@ async def test_auth_error_with_provider_mismatch() -> None:
             ),
         ]
     )
+    transport.active_provider = "echo"  # reported by session/start
     executor = MuseExecutor(lambda: transport, provider="meta")
-    executor._active_provider = "echo"  # Simulate active provider from session
     events = await collect(executor)
 
     [error] = events
     assert isinstance(error, ExecutorError)
-    assert "provider=echo" in error.message  # Active provider in message
-    assert "meta" in error.message  # Configured provider mentioned in hint
-    assert "muse login" not in error.message  # No login suggestion for echo
+    assert error.message == (
+        "Muse provider authentication failed (provider=echo, authRequired). "
+        "Muse used provider echo but the harness is configured for meta; check "
+        "executor.config.provider / HARNESS_MUSE_PROVIDER and Muse's default provider."
+    )
+    assert "muse login" not in error.message
+    assert error.retryable is False
+    assert error.preserve_session is True
+
+
+async def test_auth_error_uses_active_provider_when_unconfigured() -> None:
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="no credentials",
+                error_kind="authRequired",
+            ),
+        ]
+    )
+    transport.active_provider = "meta"
+    executor = MuseExecutor(lambda: transport)
+    [error] = await collect(executor)
+
+    assert isinstance(error, ExecutorError)
+    assert error.message.startswith(
+        "Muse provider authentication failed (provider=meta, authRequired). Run `muse login`"
+    )
 
 
 async def test_auth_error_with_missing_active_provider_metadata() -> None:
@@ -1117,4 +1144,6 @@ async def test_auth_error_with_missing_active_provider_metadata() -> None:
     [error] = events
     assert isinstance(error, ExecutorError)
     # Falls back to configured provider
-    assert "provider=unknown" in error.message or "provider=meta" in error.message
+    assert error.message.startswith(
+        "Muse provider authentication failed (provider=meta, authRequired)."
+    )
