@@ -400,6 +400,14 @@ class MuseExecutor(Executor):
         Returns formatted message for authRequired errors, or None if not auth-related.
         Per contract: message includes provider, error code, and provider-specific hint.
         Redaction: no credentials, keys, or payloads in output.
+
+        Provider resolution:
+        - self._provider: configured provider from HARNESS_MUSE_PROVIDER environment
+        - "unknown": when no provider is configured
+        Note: Provider mismatch detection (when active provider differs from configured)
+        is not yet implemented. MSP error responses do not include provider metadata;
+        detecting mismatch would require session access to query the active provider ID.
+        This is documented as a future enhancement (see CONTRACT.md § 3).
         """
         if error_kind != "authRequired":
             return None

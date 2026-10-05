@@ -957,3 +957,94 @@ def test_redaction_preserves_normal_messages() -> None:
     message = "Muse provider authentication failed (provider=meta, authRequired). Run `muse login`."
     result = MuseExecutor._redact_credentials(message)
     assert result == message
+
+
+async def test_auth_required_with_missing_provider_metadata() -> None:
+    """When provider is not configured, message uses 'unknown' provider.
+
+    This tests the case where HARNESS_MUSE_PROVIDER is not set and Muse
+    does not supply provider metadata in the error response (per MSP schema,
+    error.data does not include provider info). Future enhancement: detect
+    provider mismatch when session access becomes available.
+    """
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="no credentials",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider=None)
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert "provider=unknown" in error.message
+    assert error.retryable is False
+    assert error.preserve_session is True
+
+
+async def test_auth_error_on_dead_transport_clears_session() -> None:
+    """Auth failures during transport death clear session and set preserve_session=False.
+
+    When the transport connection dies (MspConnectionClosed), we discard it
+    and set preserve_session=False since the session cannot be reused.
+    """
+    class DeadTransport(FakeTransport):
+        async def run_turn(
+            self,
+            session_id: str,
+            *,
+            text: str,
+            reasoning_effort: str | None,
+        ) -> AsyncIterator[MuseEvent]:
+            raise MuseTransportError(
+                "host exited during turn",
+                retryable=False,
+                preserve_session=False,
+                transport_dead=True,
+            )
+
+    executor = MuseExecutor(lambda: DeadTransport(), provider="meta")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    # Dead transport sets preserve_session=False from MuseTransportError
+    assert error.preserve_session is False
+    # Session should be cleared after dead transport
+    assert executor._session_id is None
+
+
+async def test_auth_error_on_live_transport_preserves_session() -> None:
+    """Auth failures on healthy transport preserve session for retry.
+
+    When we successfully receive a turn/completed notification with
+    authRequired, the MSP connection is still healthy (since we received
+    the full event), so we preserve the session for retry after login.
+    """
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="no credentials",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    # Session preserved because transport successfully yielded the event
+    assert error.preserve_session is True
+    assert executor._session_id == "session-1"
+    # Transport should still be available for next turn
+    assert executor._transport is not None
