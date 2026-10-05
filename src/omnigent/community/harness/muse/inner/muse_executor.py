@@ -442,7 +442,11 @@ class MuseExecutor(Executor):
             # Credential-free provider: no login suggestion.
             hint = "Echo provider requires no credentials. Verify configuration and try again."
         elif provider_in_message == "meta":
-            hint = "Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment."
+            # META_API_KEY only reaches `muse serve` through the passthrough allowlist.
+            hint = (
+                "Run `muse login` or `muse auth set`, or set META_API_KEY and add it "
+                "to executor.config.env_passthrough."
+            )
         else:
             # Generic hint for local or unknown provider
             hint = "Check your Muse credentials and provider configuration."

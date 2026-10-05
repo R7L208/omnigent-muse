@@ -757,7 +757,8 @@ async def test_auth_required_with_meta_provider() -> None:
     assert isinstance(error, ExecutorError)
     assert error.message == (
         "Muse provider authentication failed (provider=meta, authRequired). "
-        "Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment."
+        "Run `muse login` or `muse auth set`, or set META_API_KEY and add it "
+        "to executor.config.env_passthrough."
     )
     assert error.retryable is False
     assert error.preserve_session is True
