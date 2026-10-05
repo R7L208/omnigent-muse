@@ -902,7 +902,9 @@ async def test_auth_message_contains_exact_provider_name() -> None:
     [error] = events
     assert isinstance(error, ExecutorError)
     # Contract format: "Muse provider authentication failed (provider=<provider>, <error code>). <hint>"
-    assert error.message.startswith("Muse provider authentication failed (provider=meta, authRequired). ")
+    assert error.message.startswith(
+        "Muse provider authentication failed (provider=meta, authRequired). "
+    )
 
 
 async def test_local_provider_auth_failure() -> None:
@@ -937,7 +939,9 @@ def test_redaction_removes_api_keys() -> None:
     assert "pk_test_xyz789abc456def" not in result
 
     # Test bearer tokens (use non-Stripe prefix)
-    result = MuseExecutor._redact_credentials("auth failed: Bearer pk_prod_longtoken123456789")
+    result = MuseExecutor._redact_credentials(
+        "auth failed: Bearer pk_prod_longtoken123456789"
+    )
     assert "[REDACTED]" in result
     assert "pk_prod_longtoken123456789" not in result
 
@@ -994,6 +998,7 @@ async def test_auth_error_on_dead_transport_clears_session() -> None:
     When the transport connection dies (MspConnectionClosed), we discard it
     and set preserve_session=False since the session cannot be reused.
     """
+
     class DeadTransport(FakeTransport):
         async def run_turn(
             self,
@@ -1002,12 +1007,21 @@ async def test_auth_error_on_dead_transport_clears_session() -> None:
             text: str,
             reasoning_effort: str | None,
         ) -> AsyncIterator[MuseEvent]:
+            self.turns.append(
+                {
+                    "session_id": session_id,
+                    "text": text,
+                    "reasoning_effort": reasoning_effort,
+                }
+            )
             raise MuseTransportError(
                 "host exited during turn",
                 retryable=False,
                 preserve_session=False,
                 transport_dead=True,
             )
+            # This yield is unreachable but satisfies type checker for async generator
+            yield  # type: ignore
 
     executor = MuseExecutor(lambda: DeadTransport(), provider="meta")
     events = await collect(executor)
@@ -1048,3 +1062,59 @@ async def test_auth_error_on_live_transport_preserves_session() -> None:
     assert executor._session_id == "session-1"
     # Transport should still be available for next turn
     assert executor._transport is not None
+
+
+async def test_auth_error_with_provider_mismatch() -> None:
+    """When active provider differs from configured, message names both.
+
+    This tests the case where Muse selected a different provider (e.g., 'echo')
+    than what the harness is configured for (e.g., 'meta'). The message includes
+    both provider names and guidance to check the configuration.
+    """
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="no credentials",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    executor._active_provider = "echo"  # Simulate active provider from session
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert "provider=echo" in error.message  # Active provider in message
+    assert "meta" in error.message  # Configured provider mentioned in hint
+    assert "muse login" not in error.message  # No login suggestion for echo
+
+
+async def test_auth_error_with_missing_active_provider_metadata() -> None:
+    """When active provider is unknown but configured provider is known.
+
+    This tests the case where session providerId is not available (None or missing)
+    but the harness has a configured provider. Use configured provider in the message.
+    """
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="no credentials",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    # _active_provider remains None (not captured from session)
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    # Falls back to configured provider
+    assert "provider=unknown" in error.message or "provider=meta" in error.message

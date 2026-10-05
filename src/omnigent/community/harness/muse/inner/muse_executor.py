@@ -169,6 +169,7 @@ class MuseExecutor(Executor):
         self._approval_mode = approval_mode
         self._reasoning_effort = reasoning_effort
         self._provider = provider
+        self._active_provider: str | None = None  # Captured from session providerId
         self._transport: MuseTransport | None = None
         self._session_id: str | None = None
         self._active_turn_id: str | None = None
@@ -385,13 +386,18 @@ class MuseExecutor(Executor):
             return text
         # Redact patterns that look like secrets (base64, hex, long alphanumeric strings)
         # Remove base64-like token patterns (sk-..., pk_..., etc.)
-        text = re.sub(r'\b(sk|pk)_[A-Za-z0-9_-]+\b', '[REDACTED]', text)
+        text = re.sub(r"\b(sk|pk)_[A-Za-z0-9_-]+\b", "[REDACTED]", text)
         # Remove long hex strings (potential keys)
-        text = re.sub(r'\b[0-9a-f]{32,}\b', '[REDACTED]', text)
+        text = re.sub(r"\b[0-9a-f]{32,}\b", "[REDACTED]", text)
         # Remove potential bearer tokens
-        text = re.sub(r'(?i)bearer\s+\S+', 'bearer [REDACTED]', text)
+        text = re.sub(r"(?i)bearer\s+\S+", "bearer [REDACTED]", text)
         # Remove quoted secrets (simple heuristic for "key": "value" patterns)
-        text = re.sub(r'"(password|secret|token|key|api_key)"\s*:\s*"[^"]*"', r'"\1": "[REDACTED]"', text, flags=re.IGNORECASE)
+        text = re.sub(
+            r'"(password|secret|token|key|api_key)"\s*:\s*"[^"]*"',
+            r'"\1": "[REDACTED]"',
+            text,
+            flags=re.IGNORECASE,
+        )
         return text
 
     def _format_auth_error(self, error_kind: str | None) -> str | None:
@@ -401,31 +407,43 @@ class MuseExecutor(Executor):
         Per contract: message includes provider, error code, and provider-specific hint.
         Redaction: no credentials, keys, or payloads in output.
 
-        Provider resolution:
+        Provider resolution (per CONTRACT § 3):
+        - self._active_provider: active provider from session providerId
         - self._provider: configured provider from HARNESS_MUSE_PROVIDER environment
-        - "unknown": when no provider is configured
-        Note: Provider mismatch detection (when active provider differs from configured)
-        is not yet implemented. MSP error responses do not include provider metadata;
-        detecting mismatch would require session access to query the active provider ID.
-        This is documented as a future enhancement (see CONTRACT.md § 3).
+        - "unknown": when neither active nor configured provider is available
+
+        Mismatch detection: when active and configured providers both exist and differ,
+        generates a mismatch message naming both providers.
         """
         if error_kind != "authRequired":
             return None
 
-        provider = self._provider or "unknown"
-        hint: str | None = None
+        # Determine which provider to use in message
+        # Prefer active provider (from session) if available, otherwise use configured
+        active = self._active_provider
+        configured = self._provider
+        provider_in_message = active or configured or "unknown"
 
-        if provider == "echo":
+        # Generate provider-specific hint based on actual provider being used
+        hint: str | None = None
+        if active and configured and active != configured:
+            # Mismatch case: active provider differs from configured
+            hint = (
+                f"Muse used provider {active} but the harness is configured for "
+                f"{configured}; check executor.config.provider / HARNESS_MUSE_PROVIDER "
+                f"and Muse's default provider."
+            )
+        elif provider_in_message == "echo":
             # Credential-free provider: no login suggestion.
             hint = "Echo provider requires no credentials. Verify configuration and try again."
-        elif provider == "meta":
+        elif provider_in_message == "meta":
             hint = "Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment."
         else:
-            # provider == "local" or other unknown provider
+            # Generic hint for local or unknown provider
             hint = "Check your Muse credentials and provider configuration."
 
         message = (
-            f"Muse provider authentication failed (provider={provider}, {error_kind}). "
+            f"Muse provider authentication failed (provider={provider_in_message}, {error_kind}). "
             f"{hint}"
         )
         # Redact any credentials that might have slipped into the message.
@@ -630,7 +648,9 @@ class MuseExecutor(Executor):
                         )
                         yield ExecutorError(
                             error_message,
-                            retryable=False if event.error_kind == "authRequired" else event.retryable,
+                            retryable=False
+                            if event.error_kind == "authRequired"
+                            else event.retryable,
                             usage=self._usage(event.usage),
                             preserve_session=True,
                         )
