@@ -234,6 +234,7 @@ class MspTransport:
                             state=state,
                             usage=usage,
                             error=event.error_message or event.reason,
+                            error_kind=event.error_kind,
                             retryable=event.error_retryable is True,
                         )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:

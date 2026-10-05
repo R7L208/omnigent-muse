@@ -731,3 +731,229 @@ def test_declares_first_class_agent_loop_capabilities() -> None:
     assert executor.supports_streaming()
     assert executor.supports_tool_calling()
     assert executor.handles_tools_internally()
+
+
+# ── Provider-aware authentication diagnostics (#13) ───────────────────────
+
+
+async def test_auth_required_with_meta_provider() -> None:
+    """Meta provider auth failure gets login hints."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="authentication required",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert error.message == (
+        "Muse provider authentication failed (provider=meta, authRequired). "
+        "Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment."
+    )
+    assert error.retryable is False
+    assert error.preserve_session is True
+
+
+async def test_auth_required_with_echo_provider() -> None:
+    """Echo provider (credential-free) does not suggest login."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="authentication required",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="echo")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert error.message == (
+        "Muse provider authentication failed (provider=echo, authRequired). "
+        "Echo provider requires no credentials. Verify configuration and try again."
+    )
+    assert "muse login" not in error.message
+    assert error.retryable is False
+    assert error.preserve_session is True
+
+
+async def test_auth_required_with_unknown_provider() -> None:
+    """No provider configured defaults to generic message."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="authentication required",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider=None)
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert error.message == (
+        "Muse provider authentication failed (provider=unknown, authRequired). "
+        "Check your Muse credentials and provider configuration."
+    )
+    assert error.retryable is False
+    assert error.preserve_session is True
+
+
+async def test_auth_required_preserves_session() -> None:
+    """Auth failures preserve healthy session for retry after login."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="no credentials",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert error.preserve_session is True
+    # Session should still be valid, so no cleanup should happen
+    assert executor._session_id == "session-1"
+
+
+async def test_non_auth_error_unchanged() -> None:
+    """Non-auth errors pass through without special handling."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="model not found",
+                error_kind="modelError",
+                retryable=True,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert error.message == "model not found"
+    assert "authentication failed" not in error.message
+    assert error.retryable is True
+    assert error.preserve_session is True
+
+
+async def test_auth_error_sets_retryable_false_even_if_msp_says_true() -> None:
+    """Auth errors are never retryable, even if MSP suggests otherwise."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="auth failed",
+                error_kind="authRequired",
+                retryable=True,  # MSP might say true, but we override
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert error.retryable is False
+
+
+async def test_auth_message_contains_exact_provider_name() -> None:
+    """Exact message format matches contract: provider=<name>, <error code>."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="logged out",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="meta")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    # Contract format: "Muse provider authentication failed (provider=<provider>, <error code>). <hint>"
+    assert error.message.startswith("Muse provider authentication failed (provider=meta, authRequired). ")
+
+
+async def test_local_provider_auth_failure() -> None:
+    """Local provider shows generic hint."""
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error="auth failed",
+                error_kind="authRequired",
+                retryable=False,
+            ),
+        ]
+    )
+    executor = MuseExecutor(lambda: transport, provider="local")
+    events = await collect(executor)
+
+    [error] = events
+    assert isinstance(error, ExecutorError)
+    assert error.message == (
+        "Muse provider authentication failed (provider=local, authRequired). "
+        "Check your Muse credentials and provider configuration."
+    )
+
+
+def test_redaction_removes_api_keys() -> None:
+    """Redaction removes API key-like patterns."""
+    # Test base64-like keys (use non-Stripe prefix to avoid false positives)
+    result = MuseExecutor._redact_credentials("error: pk_test_xyz789abc456def")
+    assert "[REDACTED]" in result
+    assert "pk_test_xyz789abc456def" not in result
+
+    # Test bearer tokens (use non-Stripe prefix)
+    result = MuseExecutor._redact_credentials("auth failed: Bearer pk_prod_longtoken123456789")
+    assert "[REDACTED]" in result
+    assert "pk_prod_longtoken123456789" not in result
+
+    # Test hex strings
+    result = MuseExecutor._redact_credentials("key=fedcba9876543210fedcba9876543210")
+    assert "[REDACTED]" in result
+    assert "fedcba9876543210fedcba9876543210" not in result
+
+    # Test JSON-style secrets
+    result = MuseExecutor._redact_credentials('{"token": "super_secret_value_xyz"}')
+    assert "[REDACTED]" in result
+    assert "super_secret_value_xyz" not in result
+
+
+def test_redaction_preserves_normal_messages() -> None:
+    """Redaction doesn't mangle regular error text."""
+    message = "Muse provider authentication failed (provider=meta, authRequired). Run `muse login`."
+    result = MuseExecutor._redact_credentials(message)
+    assert result == message

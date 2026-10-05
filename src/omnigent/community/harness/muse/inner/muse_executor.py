@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -85,6 +86,7 @@ class MuseTurnFinished:
     state: str
     usage: JsonObject = field(default_factory=dict)
     error: str | None = None
+    error_kind: str | None = None
     retryable: bool = False
 
 
@@ -159,12 +161,14 @@ class MuseExecutor(Executor):
         model: str | None = None,
         approval_mode: str = "onRequest",
         reasoning_effort: str | None = None,
+        provider: str | None = None,
     ) -> None:
         self._transport_factory = transport_factory
         self._cwd = cwd
         self._model = model
         self._approval_mode = approval_mode
         self._reasoning_effort = reasoning_effort
+        self._provider = provider
         self._transport: MuseTransport | None = None
         self._session_id: str | None = None
         self._active_turn_id: str | None = None
@@ -370,6 +374,56 @@ class MuseExecutor(Executor):
     ) -> MuseApprovalChoice | None:
         return next((choice for choice in choices if choice.decision == decision), None)
 
+    @staticmethod
+    def _redact_credentials(text: str) -> str:
+        """Remove credential-like strings from error messages.
+
+        Redacts API keys, tokens, and common credential patterns to ensure
+        sensitive information never leaks into logs or user-facing messages.
+        """
+        if not isinstance(text, str):
+            return text
+        # Redact patterns that look like secrets (base64, hex, long alphanumeric strings)
+        # Remove base64-like token patterns (sk-..., pk_..., etc.)
+        text = re.sub(r'\b(sk|pk)_[A-Za-z0-9_-]+\b', '[REDACTED]', text)
+        # Remove long hex strings (potential keys)
+        text = re.sub(r'\b[0-9a-f]{32,}\b', '[REDACTED]', text)
+        # Remove potential bearer tokens
+        text = re.sub(r'(?i)bearer\s+\S+', 'bearer [REDACTED]', text)
+        # Remove quoted secrets (simple heuristic for "key": "value" patterns)
+        text = re.sub(r'"(password|secret|token|key|api_key)"\s*:\s*"[^"]*"', r'"\1": "[REDACTED]"', text, flags=re.IGNORECASE)
+        return text
+
+    def _format_auth_error(self, error_kind: str | None) -> str | None:
+        """Format provider-aware message for authentication failures.
+
+        Returns formatted message for authRequired errors, or None if not auth-related.
+        Per contract: message includes provider, error code, and provider-specific hint.
+        Redaction: no credentials, keys, or payloads in output.
+        """
+        if error_kind != "authRequired":
+            return None
+
+        provider = self._provider or "unknown"
+        hint: str | None = None
+
+        if provider == "echo":
+            # Credential-free provider: no login suggestion.
+            hint = "Echo provider requires no credentials. Verify configuration and try again."
+        elif provider == "meta":
+            hint = "Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment."
+        else:
+            # provider == "local" or other unknown provider
+            hint = "Check your Muse credentials and provider configuration."
+
+        message = (
+            f"Muse provider authentication failed (provider={provider}, {error_kind}). "
+            f"{hint}"
+        )
+        # Redact any credentials that might have slipped into the message.
+        message = self._redact_credentials(message)
+        return message
+
     async def _resolve_approval(
         self, session_id: str, event: MuseApprovalRequested
     ) -> None:
@@ -561,9 +615,14 @@ class MuseExecutor(Executor):
                     elif event.state == "cancelled":
                         yield TurnCancelled(event.error or "user_cancelled")
                     else:
+                        # Detect provider-aware authentication failures.
+                        auth_message = self._format_auth_error(event.error_kind)
+                        error_message = auth_message or (
+                            event.error or f"Muse turn {event.state}"
+                        )
                         yield ExecutorError(
-                            event.error or f"Muse turn {event.state}",
-                            retryable=event.retryable,
+                            error_message,
+                            retryable=False if event.error_kind == "authRequired" else event.retryable,
                             usage=self._usage(event.usage),
                             preserve_session=True,
                         )
