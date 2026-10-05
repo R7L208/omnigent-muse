@@ -182,7 +182,7 @@ This is **not a transport problem** — it indicates the selected provider canno
 Muse provider authentication failed (provider=meta, authRequired). Run `muse login` or `muse auth set`, or set META_API_KEY in the harness environment.
 ```
 
-*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:413-414*
+*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:431 (via STRINGS-13.md)*
 
 - **Solution**: 
   1. Run `muse login` to authenticate interactively in your browser. This is the recommended method for local development.
@@ -202,7 +202,7 @@ Muse provider authentication failed (provider=meta, authRequired). Run `muse log
 Muse provider authentication failed (provider=echo, authRequired). Echo provider requires no credentials. Verify configuration and try again.
 ```
 
-*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:410-412*
+*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:429 (via STRINGS-13.md)*
 
 - **Cause**: Echo provider configuration is incorrect or the provider is not properly initialized.
 - **Solution**: Verify that `HARNESS_MUSE_PROVIDER=echo` is set and that `muse` is running with the `--provider echo` flag. The echo provider should not require credentials.
@@ -214,7 +214,7 @@ Muse provider authentication failed (provider=echo, authRequired). Echo provider
 Muse provider authentication failed (provider=unknown, authRequired). Check your Muse credentials and provider configuration.
 ```
 
-*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:407, 415-417*
+*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:441 (via STRINGS-13.md)*
 
 - **Cause**: The provider could not be determined (e.g., `HARNESS_MUSE_PROVIDER` is not set, Muse's config is corrupted, or no provider is configured).
 - **Solution**: Verify that `~/.config/muse/settings.json` exists and is valid JSON. Explicitly set the provider:
@@ -230,7 +230,7 @@ Muse provider authentication failed (provider=unknown, authRequired). Check your
 Muse provider authentication failed (provider=local, authRequired). Check your Muse credentials and provider configuration.
 ```
 
-*Source: STRINGS-13.md, src/omnigent/community/harness/muse/inner/muse_executor.py:415-417*
+*Source: src/omnigent/community/harness/muse/inner/muse_executor.py:441 (via STRINGS-13.md)*
 
 - **Cause**: Local provider authentication is failing, typically due to misconfigured credentials or local model endpoint not being available.
 - **Solution**: Verify your local model provider setup according to Muse documentation, then retry.
