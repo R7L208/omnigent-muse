@@ -33,6 +33,7 @@ from .muse_executor import (
     MuseTurnFinished,
     MuseTurnStarted,
 )
+from .runtime_config import PROVIDERS
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
@@ -158,7 +159,10 @@ class MspTransport:
             if session_id is None:
                 raise MspProtocolError("session/start returned no session id")
             # Nullable in MSP: a logged-out host may not have resolved a provider.
-            self._active_provider = _first_str(session.get("providerId"))
+            # Only known provider ids are kept, so host-supplied text never
+            # reaches user-facing auth diagnostics; anything else is unreported.
+            provider_id = _first_str(session.get("providerId"))
+            self._active_provider = provider_id if provider_id in PROVIDERS else None
             return session_id
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
             raise await self._handle_error(exc) from exc

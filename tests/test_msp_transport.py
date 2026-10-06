@@ -25,7 +25,9 @@ from omnigent.community.harness.muse.inner.msp_client import (
 )
 from omnigent.community.harness.muse.inner.msp_transport import MspTransport, _spawn_env
 from omnigent.community.harness.muse.inner.muse_executor import (
+    ExecutorError,
     MuseApprovalRequested,
+    MuseExecutor,
     MuseReasoningDelta,
     MuseTextDelta,
     MuseToolCall,
@@ -84,7 +86,11 @@ class _ScriptedClient:
         self.approval_error: Exception | None = None
         self.turn_error: Exception | None = None
         self.interrupt_error: Exception | None = None
+        self.provider_id: object = None
         self.closed = False
+
+    async def start_session(self, **kwargs: object) -> dict[str, Any]:
+        return {"sessionId": "s", "providerId": self.provider_id}
 
     def open_stream(self, session_id: str) -> _ScriptedStream:
         return _ScriptedStream(self.events)
@@ -247,6 +253,61 @@ async def test_spawn_omits_provider_flag_when_not_configured(monkeypatch) -> Non
 
     assert calls == [["/custom/muse", "serve"]]
     await transport.close()
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "expected"),
+    [
+        ("meta", "meta"),
+        ("echo", "echo"),
+        ("local", "local"),
+        ("future-provider", None),
+        ("sk-proj-AbC123xyz", None),
+        ("DEADBEEF" * 5, None),
+        ("", None),
+        (42, None),
+        (None, None),
+    ],
+)
+async def test_active_provider_keeps_only_known_provider_ids(
+    provider_id: object, expected: str | None
+) -> None:
+    client = _ScriptedClient()
+    client.provider_id = provider_id
+    transport = MspTransport(cast(Any, client))
+
+    await transport.start_session(
+        workspace_root=None, model=None, approval_mode="onRequest"
+    )
+
+    assert transport.active_provider == expected
+
+
+async def test_host_supplied_provider_id_never_reaches_auth_message() -> None:
+    secret = "sk-proj-AbC123xyz"
+    client = _ScriptedClient(
+        [
+            MspTurnCompleted(
+                "s", "turn-1", error_kind="authRequired", error_message=secret
+            )
+        ]
+    )
+    client.provider_id = secret
+    transport = MspTransport(cast(Any, client))
+    executor = MuseExecutor(lambda: transport, provider="meta")
+
+    events = [
+        event
+        async for event in executor.run_turn(
+            messages=[{"role": "user", "content": "hello"}], tools=[], system_prompt=""
+        )
+    ]
+
+    [error] = [event for event in events if isinstance(event, ExecutorError)]
+    assert secret not in error.message
+    assert error.message.startswith(
+        "Muse provider authentication failed (provider=meta, authRequired)."
+    )
 
 
 async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:
