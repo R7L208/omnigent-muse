@@ -66,8 +66,10 @@ authenticate Muse with one of:
          env_passthrough: [META_API_KEY]
      ```
 
-     `HARNESS_MUSE_ENV_PASSTHROUGH=META_API_KEY` and
-     `os_env.sandbox.env_passthrough` work too.
+     Names in `os_env.sandbox.env_passthrough` are always added as well.
+     `HARNESS_MUSE_ENV_PASSTHROUGH` (comma-separated) also works, but when it
+     is set in the harness environment it *replaces* `executor.config.env_passthrough`
+     rather than adding to it, so include `META_API_KEY` there too.
 
 ## Verifying readiness
 
@@ -98,7 +100,7 @@ starts, the harness connects, and a session starts. The failure appears when
 the first turn reaches the model, as a terminal turn failure. This is an
 authentication problem, not a transport problem. The harness keeps the
 session rather than tearing down the connection. After fixing the credential,
-retry; if the error persists, start a new session. A changed `META_API_KEY`
+resend the turn; if the error persists, start a new session. A changed `META_API_KEY`
 only takes effect once the harness process restarts with it.
 
 The harness reports it as:
