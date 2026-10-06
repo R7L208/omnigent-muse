@@ -968,10 +968,7 @@ def test_redaction_preserves_normal_messages() -> None:
 async def test_auth_required_with_missing_provider_metadata() -> None:
     """When provider is not configured, message uses 'unknown' provider.
 
-    This tests the case where HARNESS_MUSE_PROVIDER is not set and Muse
-    does not supply provider metadata in the error response (per MSP schema,
-    error.data does not include provider info). Future enhancement: detect
-    provider mismatch when session access becomes available.
+    Neither a configured provider nor a session providerId is available.
     """
     transport = FakeTransport(
         [
@@ -994,11 +991,10 @@ async def test_auth_required_with_missing_provider_metadata() -> None:
     assert error.preserve_session is True
 
 
-async def test_auth_error_on_dead_transport_clears_session() -> None:
-    """Auth failures during transport death clear session and set preserve_session=False.
+async def test_dead_transport_during_turn_clears_session() -> None:
+    """A transport that dies mid-turn is discarded rather than preserved.
 
-    When the transport connection dies (MspConnectionClosed), we discard it
-    and set preserve_session=False since the session cannot be reused.
+    Contrasts with authRequired on a healthy transport, which keeps the session.
     """
 
     class DeadTransport(FakeTransport):
