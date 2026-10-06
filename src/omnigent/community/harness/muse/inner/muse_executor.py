@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -380,37 +379,14 @@ class MuseExecutor(Executor):
     ) -> MuseApprovalChoice | None:
         return next((choice for choice in choices if choice.decision == decision), None)
 
-    @staticmethod
-    def _redact_credentials(text: str) -> str:
-        """Remove credential-like strings from error messages.
-
-        Redacts API keys, tokens, and common credential patterns to ensure
-        sensitive information never leaks into logs or user-facing messages.
-        """
-        if not isinstance(text, str):
-            return text
-        # Redact patterns that look like secrets (base64, hex, long alphanumeric strings)
-        # Remove base64-like token patterns (sk-..., pk_..., etc.)
-        text = re.sub(r"\b(sk|pk)_[A-Za-z0-9_-]+\b", "[REDACTED]", text)
-        # Remove long hex strings (potential keys)
-        text = re.sub(r"\b[0-9a-f]{32,}\b", "[REDACTED]", text)
-        # Remove potential bearer tokens
-        text = re.sub(r"(?i)bearer\s+\S+", "bearer [REDACTED]", text)
-        # Remove quoted secrets (simple heuristic for "key": "value" patterns)
-        text = re.sub(
-            r'"(password|secret|token|key|api_key)"\s*:\s*"[^"]*"',
-            r'"\1": "[REDACTED]"',
-            text,
-            flags=re.IGNORECASE,
-        )
-        return text
-
     def _format_auth_error(self, error_kind: str | None) -> str | None:
         """Format provider-aware message for authentication failures.
 
         Returns formatted message for authRequired errors, or None if not auth-related.
         Per contract: message includes provider, error code, and provider-specific hint.
-        Redaction: no credentials, keys, or payloads in output.
+        Secrets: built only from fixed text and validated provider ids (configured
+        values are checked in runtime_config; session ids are allowlisted in
+        MspTransport), so host error text and credentials never reach it.
 
         Provider resolution (per CONTRACT § 3):
         - self._active_provider: active provider from session providerId
@@ -455,8 +431,6 @@ class MuseExecutor(Executor):
             f"Muse provider authentication failed (provider={provider_in_message}, {error_kind}). "
             f"{hint}"
         )
-        # Redact any credentials that might have slipped into the message.
-        message = self._redact_credentials(message)
         return message
 
     async def _resolve_approval(

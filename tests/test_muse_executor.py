@@ -933,38 +933,6 @@ async def test_local_provider_auth_failure() -> None:
     )
 
 
-def test_redaction_removes_api_keys() -> None:
-    """Redaction removes API key-like patterns."""
-    # Test base64-like keys (use non-Stripe prefix to avoid false positives)
-    result = MuseExecutor._redact_credentials("error: pk_test_xyz789abc456def")
-    assert "[REDACTED]" in result
-    assert "pk_test_xyz789abc456def" not in result
-
-    # Test bearer tokens (use non-Stripe prefix)
-    result = MuseExecutor._redact_credentials(
-        "auth failed: Bearer pk_prod_longtoken123456789"
-    )
-    assert "[REDACTED]" in result
-    assert "pk_prod_longtoken123456789" not in result
-
-    # Test hex strings
-    result = MuseExecutor._redact_credentials("key=fedcba9876543210fedcba9876543210")
-    assert "[REDACTED]" in result
-    assert "fedcba9876543210fedcba9876543210" not in result
-
-    # Test JSON-style secrets
-    result = MuseExecutor._redact_credentials('{"token": "super_secret_value_xyz"}')
-    assert "[REDACTED]" in result
-    assert "super_secret_value_xyz" not in result
-
-
-def test_redaction_preserves_normal_messages() -> None:
-    """Redaction doesn't mangle regular error text."""
-    message = "Muse provider authentication failed (provider=meta, authRequired). Run `muse login`."
-    result = MuseExecutor._redact_credentials(message)
-    assert result == message
-
-
 async def test_auth_required_with_missing_provider_metadata() -> None:
     """When provider is not configured, message uses 'unknown' provider.
 
