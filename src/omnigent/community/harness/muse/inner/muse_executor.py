@@ -36,6 +36,19 @@ logger = logging.getLogger(__name__)
 
 type JsonObject = dict[str, Any]
 _TEXT_CONTENT_TYPES = frozenset({"text", "input_text", "output_text"})
+_ECHO_AUTH_HINT = (
+    "Echo provider requires no credentials. Verify configuration and try again."
+)
+# META_API_KEY only reaches `muse serve` through the passthrough allowlist.
+_META_AUTH_HINT = (
+    "Run `muse login` or `muse auth set`, or set META_API_KEY and add it "
+    "to executor.config.env_passthrough."
+)
+_GENERIC_AUTH_HINT = "Check your Muse credentials and provider configuration."
+_AUTH_MISMATCH_HINT = (
+    "Muse used provider {active} but the harness is configured for {configured}; "
+    "check executor.config.provider / HARNESS_MUSE_PROVIDER and Muse's default provider."
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,7 @@ class MuseTurnFinished:
     state: str
     usage: JsonObject = field(default_factory=dict)
     error: str | None = None
+    error_kind: str | None = None
     retryable: bool = False
 
 
@@ -114,6 +128,9 @@ class MuseTransportError(Exception):
 
 
 class MuseTransport(Protocol):
+    @property
+    def active_provider(self) -> str | None: ...
+
     async def start_session(
         self,
         *,
@@ -159,12 +176,15 @@ class MuseExecutor(Executor):
         model: str | None = None,
         approval_mode: str = "onRequest",
         reasoning_effort: str | None = None,
+        provider: str | None = None,
     ) -> None:
         self._transport_factory = transport_factory
         self._cwd = cwd
         self._model = model
         self._approval_mode = approval_mode
         self._reasoning_effort = reasoning_effort
+        self._provider = provider
+        self._active_provider: str | None = None
         self._transport: MuseTransport | None = None
         self._session_id: str | None = None
         self._active_turn_id: str | None = None
@@ -211,12 +231,14 @@ class MuseExecutor(Executor):
             raise
         self._transport = transport
         self._session_id = session_id
+        self._active_provider = transport.active_provider
         self._model = model
         return session_id
 
     async def _discard_transport(self) -> None:
         transport, self._transport = self._transport, None
         self._session_id = None
+        self._active_provider = None
         self._active_turn_id = None
         self._system_prompt_sent = False
         self._needs_replay = True
@@ -369,6 +391,25 @@ class MuseExecutor(Executor):
         choices: tuple[MuseApprovalChoice, ...], decision: str
     ) -> MuseApprovalChoice | None:
         return next((choice for choice in choices if choice.decision == decision), None)
+
+    def _format_auth_error(self, error_kind: str | None) -> str | None:
+        """Return a provider-aware message for ``authRequired``, else ``None``.
+
+        Built only from fixed hints and validated provider ids, never host text.
+        """
+        if error_kind != "authRequired":
+            return None
+        active, configured = self._active_provider, self._provider
+        provider = active or configured or "unknown"
+        if active and configured and active != configured:
+            hint = _AUTH_MISMATCH_HINT.format(active=active, configured=configured)
+        elif provider == "echo":
+            hint = _ECHO_AUTH_HINT
+        elif provider == "meta":
+            hint = _META_AUTH_HINT
+        else:
+            hint = _GENERIC_AUTH_HINT
+        return f"Muse provider authentication failed (provider={provider}, {error_kind}). {hint}"
 
     async def _resolve_approval(
         self, session_id: str, event: MuseApprovalRequested
@@ -561,9 +602,16 @@ class MuseExecutor(Executor):
                     elif event.state == "cancelled":
                         yield TurnCancelled(event.error or "user_cancelled")
                     else:
+                        # Detect provider-aware authentication failures.
+                        auth_message = self._format_auth_error(event.error_kind)
+                        error_message = auth_message or (
+                            event.error or f"Muse turn {event.state}"
+                        )
                         yield ExecutorError(
-                            event.error or f"Muse turn {event.state}",
-                            retryable=event.retryable,
+                            error_message,
+                            retryable=False
+                            if event.error_kind == "authRequired"
+                            else event.retryable,
                             usage=self._usage(event.usage),
                             preserve_session=True,
                         )

@@ -303,6 +303,7 @@ async def test_recovery_retains_non_default_runtime_configuration(
             self.starts: list[dict[str, Any]] = []
             self.turns: list[dict[str, Any]] = []
             self.closed = False
+            self.active_provider: str | None = None
             transports.append(self)
 
         async def start_session(self, **kwargs: Any) -> str:

@@ -33,6 +33,7 @@ from .muse_executor import (
     MuseTurnFinished,
     MuseTurnStarted,
 )
+from .runtime_config import PROVIDERS
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
@@ -84,6 +85,7 @@ class MspTransport:
         self._idle_timeout = idle_timeout
         self._approval_requirements: dict[tuple[str, str], JsonObject] = {}
         self._item_kinds: dict[str, str] = {}
+        self._active_provider: str | None = None
 
     @classmethod
     async def spawn(
@@ -134,6 +136,11 @@ class MspTransport:
             )
         return self._client
 
+    @property
+    def active_provider(self) -> str | None:
+        """Provider Muse reported for the current session, if any."""
+        return self._active_provider
+
     async def start_session(
         self,
         *,
@@ -151,6 +158,11 @@ class MspTransport:
             session_id = _first_str(session.get("sessionId"), session.get("id"))
             if session_id is None:
                 raise MspProtocolError("session/start returned no session id")
+            # Nullable in MSP: a logged-out host may not have resolved a provider.
+            # Only known provider ids are kept, so host-supplied text never
+            # reaches user-facing auth diagnostics; anything else is unreported.
+            provider_id = _first_str(session.get("providerId"))
+            self._active_provider = provider_id if provider_id in PROVIDERS else None
             return session_id
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
             raise await self._handle_error(exc) from exc
@@ -234,6 +246,7 @@ class MspTransport:
                             state=state,
                             usage=usage,
                             error=event.error_message or event.reason,
+                            error_kind=event.error_kind,
                             retryable=event.error_retryable is True,
                         )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
