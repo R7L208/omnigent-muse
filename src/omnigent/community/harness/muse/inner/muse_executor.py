@@ -36,6 +36,19 @@ logger = logging.getLogger(__name__)
 
 type JsonObject = dict[str, Any]
 _TEXT_CONTENT_TYPES = frozenset({"text", "input_text", "output_text"})
+_ECHO_AUTH_HINT = (
+    "Echo provider requires no credentials. Verify configuration and try again."
+)
+# META_API_KEY only reaches `muse serve` through the passthrough allowlist.
+_META_AUTH_HINT = (
+    "Run `muse login` or `muse auth set`, or set META_API_KEY and add it "
+    "to executor.config.env_passthrough."
+)
+_GENERIC_AUTH_HINT = "Check your Muse credentials and provider configuration."
+_AUTH_MISMATCH_HINT = (
+    "Muse used provider {active} but the harness is configured for {configured}; "
+    "check executor.config.provider / HARNESS_MUSE_PROVIDER and Muse's default provider."
+)
 
 
 @dataclass(frozen=True)
@@ -380,58 +393,23 @@ class MuseExecutor(Executor):
         return next((choice for choice in choices if choice.decision == decision), None)
 
     def _format_auth_error(self, error_kind: str | None) -> str | None:
-        """Format provider-aware message for authentication failures.
+        """Return a provider-aware message for ``authRequired``, else ``None``.
 
-        Returns formatted message for authRequired errors, or None if not auth-related.
-        Per contract: message includes provider, error code, and provider-specific hint.
-        Secrets: built only from fixed text and validated provider ids (configured
-        values are checked in runtime_config; session ids are allowlisted in
-        MspTransport), so host error text and credentials never reach it.
-
-        Provider resolution (per CONTRACT § 3):
-        - self._active_provider: active provider from session providerId
-        - self._provider: configured provider (executor.config.provider / HARNESS_MUSE_PROVIDER)
-        - "unknown": when neither active nor configured provider is available
-
-        Mismatch detection: when active and configured providers both exist and differ,
-        generates a mismatch message naming both providers.
+        Built only from fixed hints and validated provider ids, never host text.
         """
         if error_kind != "authRequired":
             return None
-
-        # Determine which provider to use in message
-        # Prefer active provider (from session) if available, otherwise use configured
-        active = self._active_provider
-        configured = self._provider
-        provider_in_message = active or configured or "unknown"
-
-        # Generate provider-specific hint based on actual provider being used
-        hint: str | None = None
+        active, configured = self._active_provider, self._provider
+        provider = active or configured or "unknown"
         if active and configured and active != configured:
-            # Mismatch case: active provider differs from configured
-            hint = (
-                f"Muse used provider {active} but the harness is configured for "
-                f"{configured}; check executor.config.provider / HARNESS_MUSE_PROVIDER "
-                f"and Muse's default provider."
-            )
-        elif provider_in_message == "echo":
-            # Credential-free provider: no login suggestion.
-            hint = "Echo provider requires no credentials. Verify configuration and try again."
-        elif provider_in_message == "meta":
-            # META_API_KEY only reaches `muse serve` through the passthrough allowlist.
-            hint = (
-                "Run `muse login` or `muse auth set`, or set META_API_KEY and add it "
-                "to executor.config.env_passthrough."
-            )
+            hint = _AUTH_MISMATCH_HINT.format(active=active, configured=configured)
+        elif provider == "echo":
+            hint = _ECHO_AUTH_HINT
+        elif provider == "meta":
+            hint = _META_AUTH_HINT
         else:
-            # Generic hint for local or unknown provider
-            hint = "Check your Muse credentials and provider configuration."
-
-        message = (
-            f"Muse provider authentication failed (provider={provider_in_message}, {error_kind}). "
-            f"{hint}"
-        )
-        return message
+            hint = _GENERIC_AUTH_HINT
+        return f"Muse provider authentication failed (provider={provider}, {error_kind}). {hint}"
 
     async def _resolve_approval(
         self, session_id: str, event: MuseApprovalRequested

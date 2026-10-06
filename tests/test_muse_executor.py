@@ -886,7 +886,7 @@ async def test_auth_error_sets_retryable_false_even_if_msp_says_true() -> None:
 
 
 async def test_auth_message_contains_exact_provider_name() -> None:
-    """Exact message format matches contract: provider=<name>, <error code>."""
+    """Message format is provider=<name>, <error code>."""
     transport = FakeTransport(
         [
             MuseTurnFinished(
@@ -903,7 +903,6 @@ async def test_auth_message_contains_exact_provider_name() -> None:
 
     [error] = events
     assert isinstance(error, ExecutorError)
-    # Contract format: "Muse provider authentication failed (provider=<provider>, <error code>). <hint>"
     assert error.message.startswith(
         "Muse provider authentication failed (provider=meta, authRequired). "
     )
