@@ -110,8 +110,10 @@ Muse provider authentication failed (provider=<provider>, authRequired). <hint>
 ```
 
 `<provider>` is the provider Muse reported for the session. If Muse did not
-report one, it is the configured provider, and `unknown` if neither is
-available. Messages never include credential values.
+report one, or reported an id other than `meta`, `echo`, or `local`, it is the
+configured provider, and `unknown` if neither is available. Messages are built
+only from fixed text and these provider ids, so they never include credential
+values or Muse's raw error text.
 
 #### `meta`
 
