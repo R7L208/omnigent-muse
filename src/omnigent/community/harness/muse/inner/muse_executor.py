@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -55,6 +57,11 @@ _AUTH_MISMATCH_HINT = (
 # scrubbed even when they match none of the shared token shapes.
 _CREDENTIAL_ENV_VARS = ("META_API_KEY",)
 _MIN_CREDENTIAL_LEN = 8
+# Underscore-prefixed keys (sk_live_..., pk_test_...), which the shared patterns only
+# match in their sk- form. Requiring a digit spares names like pk_orders_customer_id.
+_UNDERSCORE_KEY_PATTERN = re.compile(
+    r"\b(?:sk|pk)_(?=[A-Za-z0-9_]*\d)[A-Za-z0-9_]{10,}\b"
+)
 
 
 def _redact(text: str) -> str:
@@ -63,6 +70,7 @@ def _redact(text: str) -> str:
         value = os.environ.get(name)
         if value and len(value) >= _MIN_CREDENTIAL_LEN:
             text = text.replace(value, "[REDACTED]")
+    text = _UNDERSCORE_KEY_PATTERN.sub("[REDACTED]", text)
     return redact_log_text(text, include_whitespace_credentials=True)
 
 
@@ -646,8 +654,12 @@ class MuseExecutor(Executor):
                 retryable=exc.retryable,
                 preserve_session=exc.preserve_session,
             )
-        except Exception as exc:
-            logger.exception("Muse turn failed")
+        except Exception as exc:  # noqa: BLE001 - logged below, with redaction
+            # Core's log formatter applies only the shared patterns, not _redact's.
+            logger.error(
+                "Muse turn failed: %s",
+                _redact("".join(traceback.format_exception(exc))),
+            )
             yield ExecutorError(f"Muse turn failed: {_redact(describe_exception(exc))}")
         finally:
             self._active_turn_id = None
@@ -667,10 +679,10 @@ class MuseExecutor(Executor):
         except MuseTransportError as exc:
             if exc.transport_dead:
                 await self._discard_transport()
-            logger.debug("Muse interrupt failed: %s", exc)
+            logger.debug("Muse interrupt failed: %s", _redact(str(exc)))
             return False
         except Exception as exc:  # noqa: BLE001 - interruption is best effort
-            logger.debug("Muse interrupt failed: %s", exc)
+            logger.debug("Muse interrupt failed: %s", _redact(str(exc)))
             return False
 
     async def close_session(self, session_key: str) -> None:
