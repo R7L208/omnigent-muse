@@ -1111,3 +1111,97 @@ async def test_auth_error_with_missing_active_provider_metadata() -> None:
     assert error.message.startswith(
         "Muse provider authentication failed (provider=meta, authRequired)."
     )
+
+
+_FAKE_PROVIDER_KEY = "sk-proj-FakeKey0123456789"
+_FAKE_META_KEY = "meta-test-credential-value"
+
+
+async def test_failed_turn_error_text_is_redacted(monkeypatch) -> None:
+    monkeypatch.setenv("META_API_KEY", _FAKE_META_KEY)
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error=(
+                    f"provider rejected key {_FAKE_PROVIDER_KEY}; "
+                    f"Authorization: Bearer abc.def; env={_FAKE_META_KEY}"
+                ),
+                error_kind="providerError",
+            ),
+        ]
+    )
+    [error] = await collect(MuseExecutor(lambda: transport))
+
+    assert isinstance(error, ExecutorError)
+    assert _FAKE_PROVIDER_KEY not in error.message
+    assert _FAKE_META_KEY not in error.message
+    assert "abc.def" not in error.message
+    assert error.message.startswith("provider rejected key [REDACTED]")
+
+
+async def test_cancelled_reason_is_redacted() -> None:
+    transport = FakeTransport(
+        [MuseTurnFinished("turn-1", "cancelled", error=f"aborted {_FAKE_PROVIDER_KEY}")]
+    )
+    [event] = await collect(MuseExecutor(lambda: transport))
+
+    assert isinstance(event, TurnCancelled)
+    assert _FAKE_PROVIDER_KEY not in event.reason
+
+
+async def test_tool_error_is_redacted_but_output_is_untouched() -> None:
+    transport = FakeTransport(
+        [
+            MuseToolCall("c", "shell", {}, "started"),
+            MuseToolCall(
+                "c",
+                "shell",
+                {},
+                "failed",
+                output="key=value",
+                error=f"curl failed: Bearer {_FAKE_PROVIDER_KEY}",
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+    events = await collect(MuseExecutor(lambda: transport))
+
+    [complete] = [event for event in events if isinstance(event, ToolCallComplete)]
+    assert complete.error is not None
+    assert _FAKE_PROVIDER_KEY not in complete.error
+    assert complete.result == "key=value"
+
+
+async def test_transport_and_startup_errors_are_redacted() -> None:
+    class LeakyTransport(FakeTransport):
+        async def run_turn(
+            self,
+            session_id: str,
+            *,
+            text: str,
+            reasoning_effort: str | None,
+        ) -> AsyncIterator[MuseEvent]:
+            raise MuseTransportError(f"host said {_FAKE_PROVIDER_KEY}")
+            yield  # pragma: no cover - makes this an async generator
+
+    class LeakyStartTransport(FakeTransport):
+        async def start_session(self, **kwargs: Any) -> str:
+            raise RuntimeError(f"handshake echoed {_FAKE_PROVIDER_KEY}")
+
+    for transport in (LeakyTransport(), LeakyStartTransport()):
+        [error] = await collect(MuseExecutor(lambda transport=transport: transport))
+        assert isinstance(error, ExecutorError)
+        assert _FAKE_PROVIDER_KEY not in error.message
+        assert "[REDACTED]" in error.message
+
+
+async def test_redaction_leaves_ordinary_error_text_unchanged(monkeypatch) -> None:
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    message = "model call failed: context window exceeded (status=400)"
+    transport = FakeTransport([MuseTurnFinished("turn-1", "failed", error=message)])
+    [error] = await collect(MuseExecutor(lambda: transport))
+
+    assert isinstance(error, ExecutorError)
+    assert error.message == message
