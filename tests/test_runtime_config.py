@@ -12,7 +12,9 @@ from typing import Any, cast
 import pytest
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import ExecutorError, TurnComplete
+from omnigent.inner.sandbox import SandboxPolicy
 
+from omnigent.community.harness.muse.inner import sandbox_launch
 from omnigent.community.harness.muse.inner.runtime_config import (
     DEFAULT_APPROVAL_MODE,
     DEFAULT_TURN_IDLE_TIMEOUT,
@@ -24,6 +26,10 @@ from omnigent.community.harness.muse.inner.runtime_config import (
     ENV_TURN_IDLE_TIMEOUT,
     load_runtime_config,
 )
+from omnigent.community.harness.muse.inner.sandbox_launch import (
+    MuseSandbox,
+    MuseSandboxError,
+)
 
 _CONFIG_ENV = (
     ENV_APPROVAL_MODE,
@@ -33,6 +39,17 @@ _CONFIG_ENV = (
     ENV_OS_ENV,
     ENV_ENV_PASSTHROUGH,
 )
+
+
+def _active_policy(spec: OSEnvSpec, cwd: Path) -> SandboxPolicy:
+    return SandboxPolicy(
+        backend_type="linux_bwrap",
+        active=True,
+        read_roots=None,
+        write_roots=[],
+        write_files=[],
+        allow_network=spec.sandbox is None or spec.sandbox.allow_network,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -278,6 +295,97 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
     assert transport._provider == "local"
 
 
+def test_executor_factory_resolves_sandbox_against_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.community.harness.muse.inner.msp_transport import MspTransport
+    from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
+    from omnigent.community.harness.muse.inner.muse_harness import (
+        _build_muse_executor,
+    )
+
+    workspaces: list[Path] = []
+
+    def record(spec: OSEnvSpec, cwd: Path) -> SandboxPolicy:
+        workspaces.append(cwd)
+        return _active_policy(spec, cwd)
+
+    monkeypatch.setattr(sandbox_launch, "resolve_sandbox", record)
+    monkeypatch.setenv("HARNESS_MUSE_CWD", str(tmp_path))
+    monkeypatch.setenv(
+        ENV_OS_ENV,
+        json.dumps(
+            dataclasses.asdict(OSEnvSpec(sandbox=OSEnvSandboxSpec(type="linux_bwrap")))
+        ),
+    )
+
+    executor = cast(MuseExecutor, _build_muse_executor())
+    first = cast(MspTransport, executor._transport_factory())
+    second = cast(MspTransport, executor._transport_factory())
+
+    assert workspaces == [tmp_path.resolve()]
+    assert isinstance(first._sandbox, MuseSandbox)
+    assert second._sandbox is first._sandbox
+
+
+def test_relative_workspace_is_made_absolute_for_muse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
+    from omnigent.community.harness.muse.inner.muse_harness import (
+        _build_muse_executor,
+    )
+
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HARNESS_MUSE_CWD", "proj")
+    monkeypatch.delenv(ENV_OS_ENV, raising=False)
+
+    executor = cast(MuseExecutor, _build_muse_executor())
+
+    # A sandboxed Muse runs inside the workspace, so a relative session
+    # root would resolve to proj/proj.
+    assert executor._cwd == str(tmp_path / "proj")
+
+
+def test_executor_without_os_env_is_unsandboxed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.community.harness.muse.inner.msp_transport import MspTransport
+    from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
+    from omnigent.community.harness.muse.inner.muse_harness import (
+        _build_muse_executor,
+    )
+
+    executor = cast(MuseExecutor, _build_muse_executor())
+
+    assert cast(MspTransport, executor._transport_factory())._sandbox is None
+
+
+def test_invalid_sandbox_fails_before_transport_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.community.harness.muse.inner.muse_harness import (
+        _build_muse_executor,
+    )
+
+    monkeypatch.setattr(sandbox_launch, "resolve_sandbox", _active_policy)
+    monkeypatch.setenv(ENV_PROVIDER, "meta")
+    monkeypatch.setenv(
+        ENV_OS_ENV,
+        json.dumps(
+            dataclasses.asdict(
+                OSEnvSpec(
+                    sandbox=OSEnvSandboxSpec(type="linux_bwrap", allow_network=False)
+                )
+            )
+        ),
+    )
+
+    with pytest.raises(MuseSandboxError, match="allow_network"):
+        _build_muse_executor()
+
+
 async def test_recovery_retains_non_default_runtime_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -296,8 +404,10 @@ async def test_recovery_retains_non_default_runtime_configuration(
             idle_timeout: float,
             env_passthrough: tuple[str, ...],
             provider: str | None,
+            sandbox: object,
         ) -> None:
             self.idle_timeout = idle_timeout
+            self.sandbox = sandbox
             self.env_passthrough = env_passthrough
             self.provider = provider
             self.starts: list[dict[str, Any]] = []
@@ -338,6 +448,13 @@ async def test_recovery_retains_non_default_runtime_configuration(
     monkeypatch.setenv(ENV_REASONING_EFFORT, "ultra")
     monkeypatch.setenv(ENV_TURN_IDLE_TIMEOUT, "17")
     monkeypatch.setenv(ENV_ENV_PASSTHROUGH, "OPTED_IN")
+    monkeypatch.setenv(
+        ENV_OS_ENV,
+        json.dumps(
+            dataclasses.asdict(OSEnvSpec(sandbox=OSEnvSandboxSpec(type="linux_bwrap")))
+        ),
+    )
+    monkeypatch.setattr(sandbox_launch, "resolve_sandbox", _active_policy)
     monkeypatch.setattr(muse_harness, "MspTransport", RecoveryTransport)
 
     executor = muse_harness._build_muse_executor()
@@ -350,6 +467,8 @@ async def test_recovery_retains_non_default_runtime_configuration(
     second = [event async for event in executor.run_turn(**turn)]
 
     assert len(transports) == 2
+    assert isinstance(transports[0].sandbox, MuseSandbox)
+    assert transports[1].sandbox is transports[0].sandbox
     for transport in transports:
         assert transport.idle_timeout == 17
         assert transport.env_passthrough == ("OPTED_IN",)

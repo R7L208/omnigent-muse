@@ -19,6 +19,7 @@ from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 from .msp_transport import MspTransport
 from .muse_executor import MuseExecutor
 from .runtime_config import load_runtime_config
+from .sandbox_launch import MuseSandbox
 
 _ENV_MODEL = "HARNESS_MUSE_MODEL"
 _ENV_CWD = "HARNESS_MUSE_CWD"
@@ -26,16 +27,22 @@ _ENV_CWD = "HARNESS_MUSE_CWD"
 
 def _build_muse_executor() -> Executor:
     config = load_runtime_config()
+    workspace = os.environ.get(_ENV_CWD) or os.environ.get("OMNIGENT_RUNNER_WORKSPACE")
+    # Absolute, because a sandboxed Muse runs in the workspace itself and would
+    # resolve a relative session root against it a second time.
+    cwd = os.path.abspath(workspace) if workspace else None
+    # Resolved once, before any spawn: invalid sandboxes fail here, and every
+    # respawned transport reuses the same policy.
+    sandbox = MuseSandbox.resolve(config.os_env, cwd=cwd, provider=config.provider)
     return MuseExecutor(
         lambda: MspTransport(
             idle_timeout=config.turn_idle_timeout,
             env_passthrough=config.env_passthrough,
             provider=config.provider,
+            sandbox=sandbox,
         ),
         model=os.environ.get(_ENV_MODEL) or None,
-        cwd=os.environ.get(_ENV_CWD)
-        or os.environ.get("OMNIGENT_RUNNER_WORKSPACE")
-        or None,
+        cwd=cwd,
         approval_mode=config.approval_mode,
         reasoning_effort=config.reasoning_effort,
         provider=config.provider,
