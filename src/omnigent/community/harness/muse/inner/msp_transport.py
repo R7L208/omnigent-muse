@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -39,6 +40,10 @@ from .sandbox_launch import MuseLaunch, MuseSandbox, MuseSandboxError
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
+# Muse's approval verbs, normalized to the executor's allow/deny. Only the
+# one-shot approval maps to "allow"; session-wide and persisted grants keep
+# their own names, so a policy verdict can never select them.
+_HOST_DECISIONS = {"approved": "allow", "abort": "deny", "denied": "deny"}
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +65,17 @@ def _object(value: object) -> JsonObject:
 
 def _first_str(*values: object) -> str | None:
     return next((value for value in values if isinstance(value, str) and value), None)
+
+
+def _raw_args(raw: JsonObject, default: object) -> object:
+    """Decode Muse's ``rawArgs`` JSON string, else return ``default``."""
+    text = raw.get("rawArgs")
+    if not isinstance(text, str):
+        return default
+    try:
+        return json.loads(text)
+    except ValueError:
+        return default
 
 
 def _cleanup_abandoned_launch(task: asyncio.Future[MuseLaunch]) -> None:
@@ -380,10 +396,14 @@ class MspTransport:
                 label = (
                     _first_str(choice.get("label"), choice.get("title")) or choice_id
                 )
-                decision = _first_str(
-                    choice.get("decision"), choice.get("kind"), choice.get("value")
-                ) or self._decision(choice_id)
-                choices.append(MuseApprovalChoice(choice_id, label, decision.lower()))
+                decision = (
+                    _first_str(
+                        choice.get("decision"), choice.get("kind"), choice.get("value")
+                    )
+                    or self._decision(choice_id)
+                ).lower()
+                decision = _HOST_DECISIONS.get(decision, decision)
+                choices.append(MuseApprovalChoice(choice_id, label, decision))
         return MuseApprovalRequested(
             approval_id=event.approval_id,
             tool_name=_first_str(
@@ -398,7 +418,10 @@ class MspTransport:
                 raw.get(
                     "arguments",
                     requirement.get(
-                        "arguments", approval.get("arguments", raw.get("subject", {}))
+                        "arguments",
+                        approval.get(
+                            "arguments", _raw_args(raw, raw.get("subject", {}))
+                        ),
                     ),
                 ),
             ),

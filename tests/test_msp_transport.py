@@ -833,6 +833,63 @@ def test_idle_timeout_must_be_positive(idle_timeout: float) -> None:
         MspTransport(idle_timeout=idle_timeout)
 
 
+async def test_adapter_normalizes_live_muse_approval_payload() -> None:
+    # Shape captured from muse 1.4.4: decisions are host verbs, not allow/deny,
+    # and the tool arguments arrive as a JSON string in ``rawArgs``.
+    transport = MspTransport(cast(Any, _ScriptedClient()))
+    event = transport._approval(
+        MspApprovalRequested(
+            session_id="s",
+            approval_id="approval-1",
+            raw={
+                "approvalId": "approval-1",
+                "availableChoices": [
+                    {
+                        "choiceId": "allow_once",
+                        "decision": "approved",
+                        "label": "Allow once",
+                        "scope": "once",
+                    },
+                    {
+                        "choiceId": "allow_session",
+                        "decision": "approvedForSession",
+                        "label": "Allow for this session",
+                        "scope": "session",
+                    },
+                    {
+                        "choiceId": "allow_local_mcp_tool",
+                        "decision": "approvedPolicyAmendment",
+                        "label": "Always allow this MCP tool",
+                        "scope": "localPersistent",
+                    },
+                    {
+                        "choiceId": "abort",
+                        "decision": "abort",
+                        "label": "Reject",
+                        "scope": "once",
+                        "acceptsFeedback": True,
+                    },
+                ],
+                "currentRequirementId": {"approvalId": "approval-1", "sourceIndex": 0},
+                "rawArgs": '{"text":"hello"}',
+                "subject": {"kind": "tool", "toolName": "mcp__omnigent__probe_echo"},
+                "toolName": "mcp__omnigent__probe_echo",
+            },
+        )
+    )
+
+    assert event.tool_name == "mcp__omnigent__probe_echo"
+    assert event.arguments == {"text": "hello"}
+    # Only the one-shot approval counts as "allow", so a policy ALLOW can never
+    # pick a session-wide or persisted grant.
+    assert [(c.choice_id, c.decision) for c in event.choices] == [
+        ("allow_once", "allow"),
+        ("allow_session", "approvedforsession"),
+        ("allow_local_mcp_tool", "approvedpolicyamendment"),
+        ("abort", "deny"),
+    ]
+
+
 async def test_approval_requirement_is_preserved_after_failed_decision() -> None:
     client = _ScriptedClient()
     transport = MspTransport(cast(Any, client))
