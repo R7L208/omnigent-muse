@@ -833,6 +833,44 @@ def test_idle_timeout_must_be_positive(idle_timeout: float) -> None:
         MspTransport(idle_timeout=idle_timeout)
 
 
+async def test_start_session_forwards_mcp_servers(tmp_path: Path) -> None:
+    transport = await _transport(tmp_path)
+    servers = {
+        "omnigent": {
+            "transport": "stdio",
+            "command": "python",
+            "args": ["-I", "-m", "serve-mcp"],
+            "env": {"PYTHONUNBUFFERED": "1"},
+            "mode": "optional",
+        }
+    }
+    try:
+        await transport.start_session(
+            workspace_root=None,
+            model=None,
+            approval_mode="onRequest",
+            mcp_servers=servers,
+        )
+        [start] = _frames(tmp_path, "session/start")
+        assert start["params"]["config"] == {"mcpServers": servers}
+    finally:
+        await transport.close()
+
+
+async def test_start_session_without_mcp_servers_sends_no_config(
+    tmp_path: Path,
+) -> None:
+    transport = await _transport(tmp_path)
+    try:
+        await transport.start_session(
+            workspace_root=None, model=None, approval_mode="onRequest"
+        )
+        [start] = _frames(tmp_path, "session/start")
+        assert "config" not in start["params"]
+    finally:
+        await transport.close()
+
+
 async def test_adapter_normalizes_live_muse_approval_payload() -> None:
     # Shape captured from muse 1.4.4: decisions are host verbs, not allow/deny,
     # and the tool arguments arrive as a JSON string in ``rawArgs``.

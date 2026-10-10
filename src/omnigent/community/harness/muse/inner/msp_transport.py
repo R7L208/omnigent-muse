@@ -200,6 +200,7 @@ class MspTransport:
         workspace_root: str | None,
         model: str | None,
         approval_mode: str,
+        mcp_servers: dict[str, JsonObject] | None = None,
     ) -> str:
         try:
             client = await self._get_client()
@@ -207,6 +208,7 @@ class MspTransport:
                 workspace_root=workspace_root,
                 model_id=model,
                 approval_mode=approval_mode,
+                mcp_servers=mcp_servers,
             )
             session_id = _first_str(session.get("sessionId"), session.get("id"))
             if session_id is None:

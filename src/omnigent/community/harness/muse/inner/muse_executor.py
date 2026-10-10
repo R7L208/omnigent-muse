@@ -137,6 +137,7 @@ class MuseTransport(Protocol):
         workspace_root: str | None,
         model: str | None,
         approval_mode: str,
+        mcp_servers: dict[str, JsonObject] | None = None,
     ) -> str: ...
 
     def run_turn(
