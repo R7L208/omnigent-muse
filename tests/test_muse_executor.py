@@ -79,6 +79,46 @@ class FakeTransport:
         self.closed = True
 
 
+RELAYED_TOOLS = [
+    {
+        "name": "web_fetch",
+        "description": "Fetch a URL.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+]
+RELAY_SERVERS = {
+    "omnigent": {
+        "transport": "stdio",
+        "command": "python",
+        "args": [],
+        "env": {},
+        "mode": "optional",
+    }
+}
+
+
+class FakeRelay:
+    def __init__(self) -> None:
+        self.started: list[tuple[list[dict[str, Any]], object]] = []
+        self.closed = 0
+
+    def start(
+        self, tools: Sequence[dict[str, Any]], tool_executor: object, loop: object
+    ) -> dict[str, Any] | None:
+        self.started.append((list(tools), tool_executor))
+        return RELAY_SERVERS if tools and tool_executor is not None else None
+
+    def is_relayed(self, tool_name: str) -> bool:
+        return bool(self.started) and tool_name == "mcp__omnigent__web_fetch"
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+async def _bridge(name: str, args: dict[str, Any], **kwargs: Any) -> object:
+    return {"output": "ok"}
+
+
 async def collect(executor: MuseExecutor, **kwargs: Any) -> list[object]:
     defaults = {
         "messages": [{"role": "user", "content": "hello"}],
@@ -178,6 +218,7 @@ async def test_starts_once_injects_system_prompt_once_and_uses_latest_user_messa
             "workspace_root": "/workspace",
             "model": "model-a",
             "approval_mode": "onRequest",
+            "mcp_servers": None,
         }
     ]
     assert transport.turns[0]["text"] == "Follow the project instructions.\n\nhello"
@@ -554,7 +595,12 @@ async def test_dead_transport_is_replaced_on_next_turn() -> None:
     )
     assert isinstance(complete, TurnComplete)
     assert replacement.starts == [
-        {"workspace_root": None, "model": None, "approval_mode": "onRequest"}
+        {
+            "workspace_root": None,
+            "model": None,
+            "approval_mode": "onRequest",
+            "mcp_servers": None,
+        }
     ]
     replay = replacement.turns[0]["text"]
     assert replay.startswith("Follow the project instructions.\n\n")
@@ -1111,3 +1157,90 @@ async def test_auth_error_with_missing_active_provider_metadata() -> None:
     assert error.message.startswith(
         "Muse provider authentication failed (provider=meta, authRequired)."
     )
+
+
+async def test_session_start_attaches_relay_servers() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert relay.started == [(RELAYED_TOOLS, _bridge)]
+    assert transport.starts[0]["mcp_servers"] == RELAY_SERVERS
+
+
+async def test_empty_tool_list_starts_session_without_relay_servers() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=[])
+
+    assert transport.starts[0]["mcp_servers"] is None
+
+
+async def test_tools_without_bridge_start_session_without_relay_servers() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+
+    events = await collect(executor, tools=RELAYED_TOOLS)
+
+    assert isinstance(events[-1], TurnComplete)
+    assert transport.starts[0]["mcp_servers"] is None
+
+
+async def test_respawn_closes_old_relay_and_attaches_a_new_one() -> None:
+    dead = FakeTransport(
+        [MuseTransportError("host exited", retryable=True, transport_dead=True)]
+    )
+    replacement = FakeTransport([MuseTurnFinished("turn-2", "completed")])
+    transports = iter((dead, replacement))
+    first, second = FakeRelay(), FakeRelay()
+    relays = iter((first, second))
+    executor = MuseExecutor(
+        lambda: next(transports), relay_factory=lambda: next(relays)
+    )
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=RELAYED_TOOLS)
+    assert first.closed == 1
+
+    await collect(executor, tools=RELAYED_TOOLS)
+    assert second.started == [(RELAYED_TOOLS, _bridge)]
+    assert replacement.starts[0]["mcp_servers"] == RELAY_SERVERS
+    assert second.closed == 0
+
+
+async def test_close_closes_relay_once() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    await executor.close()
+    await executor.close()
+
+    assert relay.closed == 1
+    assert transport.closed
+
+
+async def test_failed_session_start_closes_relay() -> None:
+    class RefusingTransport(FakeTransport):
+        async def start_session(self, **kwargs: Any) -> str:
+            raise MuseTransportError("session/start refused")
+
+    transport = RefusingTransport()
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    events = await collect(executor, tools=RELAYED_TOOLS)
+
+    assert events == [ExecutorError("Muse startup failed: session/start refused")]
+    assert relay.closed == 1
+    assert transport.closed
