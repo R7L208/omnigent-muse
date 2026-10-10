@@ -39,7 +39,7 @@ async def test_start_returns_optional_stdio_server_for_serve_mcp() -> None:
 
         assert servers is not None
         [(name, entry)] = servers.items()
-        assert name == "omnigent"
+        assert name.startswith("omnigent_")
         # Muse's session/start schema: "transport", never "type"; "mode":
         # "optional" keeps a failed server from failing every turn.
         assert set(entry) == {"transport", "command", "args", "env", "mode"}
@@ -122,13 +122,69 @@ async def test_is_relayed_matches_only_advertised_tools_under_the_relay_prefix()
 ):
     relay = SessionToolRelay()
     try:
-        relay.start(TOOLS, _tool_executor, asyncio.get_running_loop())
+        servers = relay.start(TOOLS, _tool_executor, asyncio.get_running_loop())
+        assert servers is not None
+        [name] = servers
 
-        assert relay.is_relayed("mcp__omnigent__web_fetch")
-        # A project .mcp.json server that is also named "omnigent" must not
-        # inherit the relay's automatic approval.
-        assert not relay.is_relayed("mcp__omnigent__delete_everything")
+        assert relay.is_relayed(f"mcp__{name}__web_fetch")
+        assert not relay.is_relayed(f"mcp__{name}__delete_everything")
         assert not relay.is_relayed("web_fetch")
         assert not relay.is_relayed("mcp__other__web_fetch")
+    finally:
+        relay.close()
+
+
+async def test_server_name_is_unique_so_project_servers_cannot_shadow_it() -> None:
+    first, second = SessionToolRelay(), SessionToolRelay()
+    try:
+        servers_a = first.start(TOOLS, _tool_executor, asyncio.get_running_loop())
+        servers_b = second.start(TOOLS, _tool_executor, asyncio.get_running_loop())
+        assert servers_a is not None and servers_b is not None
+        [name_a], [name_b] = servers_a, servers_b
+
+        assert name_a != name_b
+        # A workspace .mcp.json can declare a server called "omnigent" with an
+        # advertised tool name; its calls never reach Omnigent policy, so they
+        # must not get the relay's automatic approval.
+        assert not first.is_relayed("mcp__omnigent__web_fetch")
+        assert not first.is_relayed(f"mcp__{name_b}__web_fetch")
+        assert first.is_relayed(f"mcp__{name_a}__web_fetch")
+    finally:
+        first.close()
+        second.close()
+
+
+async def test_busy_while_a_relayed_call_is_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubRelay:
+        def close(self) -> None:
+            pass
+
+    def capturing_start(**kwargs: Any) -> _StubRelay:
+        captured.update(kwargs)
+        return _StubRelay()
+
+    monkeypatch.setattr(bridge, "start_tool_relay", capturing_start)
+    release = asyncio.Event()
+
+    async def slow_executor(name: str, args: dict[str, Any]) -> object:
+        await release.wait()
+        return {"output": "ok"}
+
+    relay = SessionToolRelay()
+    try:
+        assert relay.start(TOOLS, slow_executor, asyncio.get_running_loop())
+        assert not relay.busy()
+
+        call = asyncio.create_task(captured["tool_executor"]("web_fetch", {}))
+        await asyncio.sleep(0)
+        assert relay.busy()
+
+        release.set()
+        assert await call == {"output": "ok"}
+        assert not relay.busy()
     finally:
         relay.close()
