@@ -85,6 +85,24 @@ tests; `meta` requires Muse-owned authentication through `muse login`,
 See [docs/authentication.md](docs/authentication.md) for per-provider setup,
 readiness checks, and troubleshooting authentication failures.
 
+## Omnigent tools
+
+The Omnigent tools an agent is given (session, agent, policy, skill and web
+tools) are exposed to Muse as an MCP server named `omnigent`, so Muse sees
+them as `mcp__omnigent__<tool>` next to its built-in tools. Each Muse session
+gets its own relay, started with the session and stopped when the session
+ends or the transport is respawned.
+
+Calls go through Omnigent's policy (allow, ask, deny) when they are
+dispatched, and approval cards appear in Omnigent as for other harnesses.
+Muse's own approval prompt for these tools is answered automatically with a
+one-time grant, so a call is never approved twice and no "always allow" rule
+is written to your Muse settings.
+
+The relay is best effort: if it cannot start, the session runs with Muse's
+built-in tools only and a warning is logged. Sandboxed sessions do not get
+Omnigent tools yet (see below).
+
 ## Sandboxing
 
 When `os_env.sandbox` selects the `linux_bwrap` backend, `muse serve` is
@@ -120,6 +138,9 @@ Inside the sandbox the harness:
   when you log in again (or dropped when you log out). `trust.json` is not
   copied, so a sandboxed run starts with no trusted workspaces.
   `META_API_KEY` reaches Muse only when it is passed through, as unsandboxed;
+- does not expose Omnigent tools: the relay's bridge directory is not
+  reachable from inside the sandbox yet, so the session runs with Muse's
+  built-in tools only;
 - hides your own Muse directories (`~/.config/muse`, `~/.local/share/muse`,
   `~/.local/state/muse`, `~/.cache/muse`, or their `$XDG_*_HOME`
   equivalents), which a broader read grant would otherwise expose. A path the

@@ -15,6 +15,7 @@ from omnigent.inner.executor import ExecutorError, TurnComplete
 from omnigent.inner.sandbox import SandboxPolicy
 
 from omnigent.community.harness.muse.inner import sandbox_launch
+from omnigent.community.harness.muse.inner.omnigent_tool_relay import SessionToolRelay
 from omnigent.community.harness.muse.inner.runtime_config import (
     DEFAULT_APPROVAL_MODE,
     DEFAULT_TURN_IDLE_TIMEOUT,
@@ -293,6 +294,10 @@ def test_executor_factory_applies_validated_defaults_to_respawn_factory(
     assert transport._idle_timeout == 17
     assert transport._env_passthrough == ("OPTED_IN",)
     assert transport._provider == "local"
+    assert executor._relay_factory is not None
+    relay = executor._relay_factory()
+    assert isinstance(relay, SessionToolRelay)
+    assert relay._sandboxed is False
 
 
 def test_executor_factory_resolves_sandbox_against_workspace(
@@ -326,6 +331,10 @@ def test_executor_factory_resolves_sandbox_against_workspace(
     assert workspaces == [tmp_path.resolve()]
     assert isinstance(first._sandbox, MuseSandbox)
     assert second._sandbox is first._sandbox
+    assert executor._relay_factory is not None
+    relay = executor._relay_factory()
+    assert isinstance(relay, SessionToolRelay)
+    assert relay._sandboxed is True
 
 
 def test_relative_workspace_is_made_absolute_for_muse(

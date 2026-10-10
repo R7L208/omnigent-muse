@@ -18,6 +18,7 @@ from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
 from .msp_transport import MspTransport
 from .muse_executor import MuseExecutor
+from .omnigent_tool_relay import SessionToolRelay
 from .runtime_config import load_runtime_config
 from .sandbox_launch import MuseSandbox
 
@@ -46,6 +47,8 @@ def _build_muse_executor() -> Executor:
         approval_mode=config.approval_mode,
         reasoning_effort=config.reasoning_effort,
         provider=config.provider,
+        # Sandboxed Muse cannot reach the relay's bridge dir yet.
+        relay_factory=lambda: SessionToolRelay(sandboxed=sandbox is not None),
     )
 
 
