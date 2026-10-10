@@ -1244,3 +1244,124 @@ async def test_failed_session_start_closes_relay() -> None:
     assert events == [ExecutorError("Muse startup failed: session/start refused")]
     assert relay.closed == 1
     assert transport.closed
+
+
+LIVE_MCP_CHOICES = (
+    MuseApprovalChoice("allow_once", "Allow once", "allow"),
+    MuseApprovalChoice("allow_session", "Allow for this session", "approvedforsession"),
+    MuseApprovalChoice(
+        "allow_local_mcp_tool", "Always allow this MCP tool", "approvedpolicyamendment"
+    ),
+    MuseApprovalChoice("abort", "Reject", "deny"),
+)
+
+
+def _relay_executor(
+    events: list[MuseEvent | BaseException],
+) -> tuple[MuseExecutor, FakeTransport]:
+    transport = FakeTransport(events)
+    executor = MuseExecutor(lambda: transport, relay_factory=FakeRelay)
+    executor._tool_executor = _bridge
+    return executor, transport
+
+
+async def test_relayed_approval_takes_one_shot_grant_without_prompting() -> None:
+    executor, transport = _relay_executor(
+        [
+            MuseApprovalRequested(
+                "approval-1",
+                "mcp__omnigent__web_fetch",
+                {"url": "https://example.com"},
+                choices=LIVE_MCP_CHOICES,
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+
+    async def no_policy(*args: Any) -> Verdict:
+        raise AssertionError("Omnigent policy runs at dispatch, not here")
+
+    async def no_prompt(*args: Any) -> str:
+        raise AssertionError("relayed calls must not prompt twice")
+
+    executor._policy_evaluator = no_policy
+    executor._elicitation_choice_handler = no_prompt
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert transport.decisions == [("session-1", "approval-1", "allow_once")]
+
+
+async def test_unadvertised_omnigent_named_tool_uses_policy() -> None:
+    executor, transport = _relay_executor(
+        [
+            MuseApprovalRequested(
+                "approval-1",
+                "mcp__omnigent__delete_everything",
+                {},
+                choices=LIVE_MCP_CHOICES,
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+
+    async def deny(*args: Any) -> Verdict:
+        return Verdict("POLICY_ACTION_DENY")
+
+    executor._policy_evaluator = deny
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert transport.decisions == [("session-1", "approval-1", "abort")]
+
+
+async def test_relayed_approval_without_one_shot_grant_falls_back_to_policy() -> None:
+    executor, transport = _relay_executor(
+        [
+            MuseApprovalRequested(
+                "approval-1",
+                "mcp__omnigent__web_fetch",
+                {},
+                choices=(
+                    MuseApprovalChoice(
+                        "allow_session", "Allow for this session", "approvedforsession"
+                    ),
+                    MuseApprovalChoice("abort", "Reject", "deny"),
+                ),
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+    calls: list[str] = []
+
+    async def deny(phase: str, data: dict[str, Any]) -> Verdict:
+        calls.append(data["name"])
+        return Verdict("POLICY_ACTION_DENY")
+
+    executor._policy_evaluator = deny
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert calls == ["mcp__omnigent__web_fetch"]
+    assert transport.decisions == [("session-1", "approval-1", "abort")]
+
+
+async def test_relayed_tool_events_are_left_to_dispatch() -> None:
+    executor, _ = _relay_executor(
+        [
+            MuseToolCall("call-r", "mcp__omnigent__web_fetch", {"url": "u"}, "started"),
+            MuseToolCall(
+                "call-r", "mcp__omnigent__web_fetch", {}, "completed", output="ok"
+            ),
+            MuseToolCall("call-b", "shell", {"command": "pwd"}, "started"),
+            MuseToolCall("call-b", "shell", {}, "completed", output="/tmp"),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+
+    events = await collect(executor, tools=RELAYED_TOOLS)
+
+    tool_events = [
+        event
+        for event in events
+        if isinstance(event, ToolCallRequest | ToolCallComplete)
+    ]
+    assert [type(event) for event in tool_events] == [ToolCallRequest, ToolCallComplete]
+    assert all(event.name == "shell" for event in tool_events)

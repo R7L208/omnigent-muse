@@ -459,6 +459,16 @@ class MuseExecutor(Executor):
         transport = self._transport
         if transport is None:
             raise MuseTransportError("approval arrived before transport startup")
+        if self._relay is not None and self._relay.is_relayed(event.tool_name):
+            # Omnigent policy runs when the relay dispatches the call, so a
+            # second prompt here would ask twice. Only the one-shot grant is
+            # taken; session-wide and persisted grants are never chosen.
+            one_shot = self._choice(event.choices, "allow")
+            if one_shot is not None:
+                await transport.decide_approval(
+                    session_id, event.approval_id, one_shot.choice_id
+                )
+                return
         arguments = self._arguments(event.arguments)
         action: str | None = None
         if self._policy_evaluator is not None:
@@ -510,6 +520,9 @@ class MuseExecutor(Executor):
         )
 
     def _translate_tool(self, event: MuseToolCall) -> ExecutorEvent | None:
+        if self._relay is not None and self._relay.is_relayed(event.name):
+            # dispatch_tool already records relayed calls and their output.
+            return None
         arguments = self._arguments(event.arguments)
         if event.state in {"started", "inProgress"}:
             already_seen = event.call_id in self._tool_calls
