@@ -71,7 +71,8 @@ async def test_muse_calls_omnigent_tool_through_relay() -> None:
 
         assert finished and finished[-1].state == "completed"
         assert calls == [("probe_echo", {"text": "hello"})]
-        assert any(event.name == "mcp__omnigent__probe_echo" for event in tools)
+        [server] = servers
+        assert any(event.name == f"mcp__{server}__probe_echo" for event in tools)
     finally:
         await transport.close()
         relay.close()

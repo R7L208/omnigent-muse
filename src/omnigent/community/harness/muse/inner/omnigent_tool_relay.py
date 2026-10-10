@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -42,6 +43,7 @@ class SessionToolRelay:
         self._bridge_dir: Path | None = None
         self._prefix: str | None = None
         self._tool_names: frozenset[str] = frozenset()
+        self._in_flight = 0
 
     def start(
         self,
@@ -72,15 +74,19 @@ class SessionToolRelay:
             self._relay = bridge.start_tool_relay(
                 bridge_dir=self._bridge_dir,
                 tools=list(tools),
-                tool_executor=tool_executor,
+                tool_executor=self._counted(tool_executor),
                 loop=loop,
             )
             servers = bridge.build_mcp_config(self._bridge_dir)["mcpServers"]
             if not isinstance(servers, dict):
                 raise TypeError(f"unexpected serve-mcp config: {servers!r}")
-            [(name, spec)] = servers.items()
-            if not isinstance(name, str) or not isinstance(spec, dict):
-                raise TypeError(f"unexpected serve-mcp entry: {name!r}")
+            [(core_name, spec)] = servers.items()
+            if not isinstance(spec, dict):
+                raise TypeError(f"unexpected serve-mcp entry: {core_name!r}")
+            # Unique per session: a workspace .mcp.json server can be called
+            # "omnigent" and reuse an advertised tool name, and its calls must
+            # never inherit the relay's automatic approval.
+            name = f"omnigent_{secrets.token_hex(4)}"
             entry: JsonObject = {
                 "transport": "stdio",
                 "command": spec["command"],
@@ -101,6 +107,26 @@ class SessionToolRelay:
             str(tool["name"]) for tool in tools if tool.get("name")
         )
         return {name: entry}
+
+    def busy(self) -> bool:
+        """Whether a relayed call is still being dispatched.
+
+        Muse emits nothing while it waits on an MCP call, which can sit on an
+        Omnigent approval card for longer than the turn idle timeout.
+        """
+        return self._in_flight > 0
+
+    def _counted(self, tool_executor: ToolExecutor) -> ToolExecutor:
+        # The relay schedules every call on the session's loop, so the counter
+        # is only touched from that loop's thread.
+        async def counted(*args: Any, **kwargs: Any) -> object:
+            self._in_flight += 1
+            try:
+                return await tool_executor(*args, **kwargs)
+            finally:
+                self._in_flight -= 1
+
+        return counted
 
     def is_relayed(self, tool_name: str) -> bool:
         """Whether Muse's ``tool_name`` is a tool this relay advertised."""

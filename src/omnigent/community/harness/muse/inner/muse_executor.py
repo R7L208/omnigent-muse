@@ -147,6 +147,7 @@ class MuseTransport(Protocol):
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]: ...
 
     async def decide_approval(
@@ -172,6 +173,8 @@ class ToolRelay(Protocol):
     ) -> dict[str, JsonObject] | None: ...
 
     def is_relayed(self, tool_name: str) -> bool: ...
+
+    def busy(self) -> bool: ...
 
     def close(self) -> None: ...
 
@@ -625,7 +628,11 @@ class MuseExecutor(Executor):
         try:
             assert self._transport is not None
             async for event in self._transport.run_turn(
-                session_id, text=text, reasoning_effort=effort
+                session_id,
+                text=text,
+                reasoning_effort=effort,
+                # A relayed call waiting on an Omnigent approval card is not idle.
+                busy=self._relay.busy if self._relay is not None else None,
             ):
                 # Receiving any event proves the host accepted our input (which
                 # carried the system prompt on the first turn); only now is it

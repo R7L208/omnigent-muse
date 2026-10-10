@@ -88,16 +88,19 @@ readiness checks, and troubleshooting authentication failures.
 ## Omnigent tools
 
 The Omnigent tools an agent is given (session, agent, policy, skill and web
-tools) are exposed to Muse as an MCP server named `omnigent`, so Muse sees
-them as `mcp__omnigent__<tool>` next to its built-in tools. Each Muse session
-gets its own relay, started with the session and stopped when the session
-ends or the transport is respawned.
+tools) are exposed to Muse as an MCP server named `omnigent_<random>`, so
+Muse sees them as `mcp__omnigent_<random>__<tool>` next to its built-in tools.
+Each Muse session gets its own relay, with a fresh name, started with the
+session and stopped when the session ends or the transport is respawned. The
+random suffix keeps a workspace `.mcp.json` server from posing as the relay.
 
 Calls go through Omnigent's policy (allow, ask, deny) when they are
 dispatched, and approval cards appear in Omnigent as for other harnesses.
 Muse's own approval prompt for these tools is answered automatically with a
 one-time grant, so a call is never approved twice and no "always allow" rule
-is written to your Muse settings.
+is written to your Muse settings. While an Omnigent tool call is still
+running, including one waiting on an approval card, the turn idle timeout
+(`turn_idle_timeout`) does not fire.
 
 The relay is best effort: if it cannot start, the session runs with Muse's
 built-in tools only and a warning is logged. Sandboxed sessions do not get

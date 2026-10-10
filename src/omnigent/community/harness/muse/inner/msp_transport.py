@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from .msp_client import (
     MspClient,
     MspConnectionClosed,
     MspError,
+    MspEvent,
     MspItemUpdate,
     MspProtocolError,
     MspTextDelta,
@@ -228,7 +230,14 @@ class MspTransport:
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]:
+        """Run one turn, failing if Muse is silent for the idle timeout.
+
+        :param busy: Returns whether work Muse is waiting on is still in
+            progress (a relayed Omnigent call); the idle timeout does not
+            fire while it returns true.
+        """
         try:
             client = await self._get_client()
             with client.open_stream(session_id) as stream:
@@ -247,15 +256,9 @@ class MspTransport:
                 events = stream.follow(turn_id)
                 while True:
                     try:
-                        async with asyncio.timeout(self._idle_timeout):
-                            event = await anext(events)
+                        event = await self._next_event(events, busy)
                     except StopAsyncIteration:
                         break
-                    except TimeoutError as exc:
-                        raise MuseTransportError(
-                            f"Muse turn produced no events for {self._idle_timeout:g}s",
-                            retryable=True,
-                        ) from exc
                     if isinstance(event, MspTextDelta):
                         kind = self._item_kinds.get(event.item_id)
                         if kind == "reasoning" or (
@@ -306,6 +309,28 @@ class MspTransport:
                         )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
             raise await self._handle_error(exc) from exc
+
+    async def _next_event(
+        self, events: AsyncIterator[MspEvent], busy: Callable[[], bool] | None
+    ) -> MspEvent:
+        # Waits on one task rather than cancelling on each timeout: cancelling
+        # anext() would close the stream while a busy turn is still running.
+        pending = asyncio.ensure_future(anext(events))
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=self._idle_timeout)
+                if done:
+                    return pending.result()
+                if busy is None or not busy():
+                    raise MuseTransportError(
+                        f"Muse turn produced no events for {self._idle_timeout:g}s",
+                        retryable=True,
+                    )
+        finally:
+            if not pending.done():
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await pending
 
     async def decide_approval(
         self, session_id: str, approval_id: str, choice_id: str

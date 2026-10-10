@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,12 +53,14 @@ class FakeTransport:
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]:
         self.turns.append(
             {
                 "session_id": session_id,
                 "text": text,
                 "reasoning_effort": reasoning_effort,
+                "busy": busy,
             }
         )
         for event in self.events:
@@ -110,6 +112,9 @@ class FakeRelay:
 
     def is_relayed(self, tool_name: str) -> bool:
         return bool(self.started) and tool_name == "mcp__omnigent__web_fetch"
+
+    def busy(self) -> bool:
+        return False
 
     def close(self) -> None:
         self.closed += 1
@@ -461,6 +466,7 @@ async def test_interrupt_delegates_for_live_turn() -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             yield MuseTurnStarted("turn-live")
             started.set()
@@ -488,6 +494,7 @@ async def test_dead_transport_during_interrupt_clears_stale_session() -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             yield MuseTurnStarted("turn-live")
             started.set()
@@ -527,6 +534,7 @@ class FailFirstTurnTransport(FakeTransport):
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]:
         self.turns.append(
             {
@@ -1017,6 +1025,7 @@ async def test_dead_transport_during_turn_clears_session() -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             self.turns.append(
                 {
@@ -1365,3 +1374,22 @@ async def test_relayed_tool_events_are_left_to_dispatch() -> None:
     ]
     assert [type(event) for event in tool_events] == [ToolCallRequest, ToolCallComplete]
     assert all(event.name == "shell" for event in tool_events)
+
+
+async def test_turn_lets_relay_activity_hold_off_the_idle_timeout() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert transport.turns[0]["busy"] == relay.busy
+
+
+async def test_turn_without_relay_keeps_the_plain_idle_timeout() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+
+    await collect(MuseExecutor(lambda: transport))
+
+    assert transport.turns[0]["busy"] is None

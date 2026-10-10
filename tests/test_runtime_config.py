@@ -4,7 +4,7 @@ import dataclasses
 import json
 import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -435,6 +435,7 @@ async def test_recovery_retains_non_default_runtime_configuration(
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[Any]:
             self.turns.append(
                 {

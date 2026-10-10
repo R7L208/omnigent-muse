@@ -827,6 +827,38 @@ async def test_turn_times_out_after_activity_stops() -> None:
         ]
 
 
+async def test_idle_timeout_waits_while_a_relayed_call_is_in_flight() -> None:
+    # Muse emits nothing while a relayed Omnigent call waits on an approval
+    # card, which can take longer than the idle timeout.
+    stream = _DelayedStream([(0.05, MspTurnCompleted("s", "turn-1"))])
+    transport = MspTransport(cast(Any, _DelayedClient(stream)), idle_timeout=0.01)
+
+    events = [
+        event
+        async for event in transport.run_turn(
+            "s", text="hello", reasoning_effort=None, busy=lambda: True
+        )
+    ]
+
+    assert isinstance(events[-1], MuseTurnFinished)
+
+
+async def test_idle_timeout_applies_again_once_relayed_calls_finish() -> None:
+    stream = _DelayedStream([], stall=True)
+    transport = MspTransport(cast(Any, _DelayedClient(stream)), idle_timeout=0.01)
+    in_flight = [True]
+    asyncio.get_running_loop().call_later(0.03, in_flight.clear)
+
+    with pytest.raises(MuseTransportError, match="no events for 0.01s"):
+        _ = [
+            event
+            async for event in transport.run_turn(
+                "s", text="hello", reasoning_effort=None, busy=lambda: bool(in_flight)
+            )
+        ]
+    assert not in_flight
+
+
 @pytest.mark.parametrize("idle_timeout", [0, -1])
 def test_idle_timeout_must_be_positive(idle_timeout: float) -> None:
     with pytest.raises(ValueError, match="greater than zero"):
