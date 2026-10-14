@@ -36,6 +36,12 @@ lint:
     uv run --no-sync ruff format --check .
     uv run --no-sync pyrefly check
 
+# Drive a real `muse serve` through Omnigent's harness runner (needs `muse`
+# on PATH or OMNIGENT_MUSE_PATH; credential-free).
+[group('check')]
+integration:
+    OMNIGENT_MUSE_INTEGRATION=1 uv run --no-sync pytest tests/integration -v
+
 # Run all fast local checks.
 [group('check')]
 check: lint test
