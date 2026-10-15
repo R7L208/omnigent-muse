@@ -119,6 +119,7 @@ class MspTransport:
         self._provider = provider
         self._idle_timeout = idle_timeout
         self._sandbox = sandbox
+        self._spawn_lock = asyncio.Lock()
         self._approval_requirements: dict[tuple[str, str], JsonObject] = {}
         self._item_kinds: dict[str, str] = {}
         self._active_provider: str | None = None
@@ -148,9 +149,12 @@ class MspTransport:
         return transport
 
     async def _get_client(self) -> MspClient:
-        if self._client is None:
-            self._client = await self._spawn_client()
-        return self._client
+        # Concurrent callers after a respawn must share one host, not each
+        # start (and leak) their own.
+        async with self._spawn_lock:
+            if self._client is None:
+                self._client = await self._spawn_client()
+            return self._client
 
     async def _spawn_client(self) -> MspClient:
         binary = self._executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"

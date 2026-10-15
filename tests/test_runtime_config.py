@@ -337,6 +337,34 @@ def test_executor_factory_resolves_sandbox_against_workspace(
     assert relay._sandboxed is True
 
 
+def test_sandboxed_executor_sends_the_resolved_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
+    from omnigent.community.harness.muse.inner.muse_harness import (
+        _build_muse_executor,
+    )
+
+    real = tmp_path / "data" / "proj"
+    real.mkdir(parents=True)
+    link = tmp_path / "proj"
+    link.symlink_to(real)
+    monkeypatch.setattr(sandbox_launch, "resolve_sandbox", _active_policy)
+    monkeypatch.setenv("HARNESS_MUSE_CWD", str(link))
+    monkeypatch.setenv(
+        ENV_OS_ENV,
+        json.dumps(
+            dataclasses.asdict(OSEnvSpec(sandbox=OSEnvSandboxSpec(type="linux_bwrap")))
+        ),
+    )
+
+    executor = cast(MuseExecutor, _build_muse_executor())
+
+    # bwrap mounts only the resolved path, so the symlink would not exist
+    # inside the sandbox.
+    assert executor._cwd == str(real.resolve())
+
+
 def test_relative_workspace_is_made_absolute_for_muse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

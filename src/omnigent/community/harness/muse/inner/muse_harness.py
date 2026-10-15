@@ -35,6 +35,10 @@ def _build_muse_executor() -> Executor:
     # Resolved once, before any spawn: invalid sandboxes fail here, and every
     # respawned transport reuses the same policy.
     sandbox = MuseSandbox.resolve(config.os_env, cwd=cwd, provider=config.provider)
+    if sandbox is not None:
+        # The sandbox mounts only the resolved path, so a symlinked workspace
+        # must reach Muse resolved too.
+        cwd = str(sandbox.workspace)
     return MuseExecutor(
         lambda: MspTransport(
             idle_timeout=config.turn_idle_timeout,

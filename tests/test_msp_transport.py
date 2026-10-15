@@ -431,6 +431,30 @@ def test_sandboxed_transport_rejects_a_different_cwd(tmp_path) -> None:
         MspTransport(cwd=str(tmp_path / "elsewhere"), sandbox=sandbox)
 
 
+async def test_concurrent_callers_share_one_respawned_host(monkeypatch) -> None:
+    clients = [_ScriptedClient(), _ScriptedClient(), _ScriptedClient()]
+    pending = iter(clients)
+    release = asyncio.Event()
+
+    async def fake_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        client = next(pending)
+        if client is not clients[0]:
+            await release.wait()
+        return client
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(fake_spawn))
+    transport = await MspTransport.spawn(env={"HOME": "/home/test"})
+    await transport._handle_error(MspConnectionClosed("dead"))
+    first = asyncio.ensure_future(transport._get_client())
+    second = asyncio.ensure_future(transport._get_client())
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await first is await second is clients[1]
+    assert next(pending) is clients[2]  # never spawned
+    await transport.close()
+
+
 async def test_respawn_rebuilds_launch_from_same_sandbox(monkeypatch) -> None:
     clients = [_ScriptedClient(), _ScriptedClient()]
     pending = iter(clients)

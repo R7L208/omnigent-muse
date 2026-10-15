@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
+from omnigent.inner import datamodel
 from omnigent.inner.datamodel import CredentialProxySpec, OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.sandbox import SandboxPolicy
 
@@ -42,8 +46,38 @@ def _executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
     return path
 
 
+class _FakeBackend:
+    """Records the launch-time wrap probe instead of building a bwrap argv."""
+
+    def __init__(self) -> None:
+        self.wrapped: list[tuple[SandboxPolicy, Path, str | None]] = []
+        self.error: OSError | None = None
+
+    def wrap_launcher_argv(
+        self,
+        argv: list[str],
+        policy: SandboxPolicy,
+        cwd: Path,
+        chdir: Path | None = None,
+        target: str | None = None,
+    ) -> list[str]:
+        if self.error is not None:
+            raise self.error
+        self.wrapped.append((policy, cwd, target))
+        return ["bwrap", *argv]
+
+
 @pytest.fixture
-def resolved(monkeypatch: pytest.MonkeyPatch) -> list[tuple[OSEnvSpec, Path]]:
+def backend(monkeypatch: pytest.MonkeyPatch) -> _FakeBackend:
+    fake = _FakeBackend()
+    monkeypatch.setattr(sandbox_launch, "get_backend", lambda type_name: fake)
+    return fake
+
+
+@pytest.fixture
+def resolved(
+    monkeypatch: pytest.MonkeyPatch, backend: _FakeBackend
+) -> list[tuple[OSEnvSpec, Path]]:
     """Stub policy resolution so tests do not depend on the host's bwrap."""
     calls: list[tuple[OSEnvSpec, Path]] = []
     policy = _policy()
@@ -105,6 +139,25 @@ def test_unsupported_backends_fail_explicitly(
         MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
 
 
+def _git_ssh_specs() -> list[OSEnvSandboxSpec]:
+    """A spec using ``git_ssh``, on omnigent releases that have it."""
+    binding = getattr(datamodel, "GitSshBinding", None)
+    if binding is None:
+        return []
+    git_ssh = binding(
+        host="github.com",
+        port=22,
+        username="git",
+        repository="org/repo",
+        operations=frozenset({"fetch"}),
+        identity_file="/keys/id",
+        known_hosts_file="/keys/known_hosts",
+    )
+    # Built untyped: the field is missing from older omnigent releases.
+    spec: Any = OSEnvSandboxSpec
+    return [spec(type="linux_bwrap", git_ssh=[git_ssh])]
+
+
 @pytest.mark.parametrize(
     "sandbox_spec",
     [
@@ -114,17 +167,47 @@ def test_unsupported_backends_fail_explicitly(
             credential_proxy=CredentialProxySpec(entries=[]),
             egress_rules=[],
         ),
+        *_git_ssh_specs(),
     ],
 )
-def test_egress_and_credential_proxy_are_rejected(
+def test_options_needing_a_parent_helper_are_rejected(
     tmp_path: Path,
     resolved: list[tuple[OSEnvSpec, Path]],
     sandbox_spec: OSEnvSandboxSpec,
 ) -> None:
     spec = OSEnvSpec(sandbox=sandbox_spec)
 
-    with pytest.raises(MuseSandboxError, match="egress proxy"):
+    with pytest.raises(MuseSandboxError, match="not yet supported for Muse"):
         MuseSandbox.resolve(spec, cwd=tmp_path, provider="meta")
+
+
+@pytest.mark.parametrize("as_file", [False, True])
+def test_a_write_grant_covering_the_launcher_directory_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, as_file: bool
+) -> None:
+    grant = Path(tempfile.gettempdir()).resolve()
+    if as_file:
+        policy = dataclasses.replace(_policy(), write_files=[grant])
+    else:
+        policy = dataclasses.replace(_policy(), write_roots=[grant])
+    monkeypatch.setattr(sandbox_launch, "resolve_sandbox", lambda spec, cwd: policy)
+
+    with pytest.raises(MuseSandboxError, match="sandbox launcher"):
+        MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+
+
+def test_resolve_logs_the_chosen_sandbox(
+    tmp_path: Path,
+    resolved: list[tuple[OSEnvSpec, Path]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("INFO", logger=sandbox_launch.__name__):
+        MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+
+    message = caplog.records[-1].getMessage()
+    assert "linux_bwrap" in message
+    assert str(tmp_path.resolve()) in message
+    assert str(sandbox_launch.private_home(tmp_path.resolve())) in message
 
 
 def test_seatbelt_is_rejected_until_core_supports_muse(
@@ -238,7 +321,9 @@ def test_launch_wraps_real_binary_and_delegates_shell_sandbox(
         }
 
         policy = launch.policy
-        assert policy.read_roots == [sandbox_launch._OMNIGENT_IMPORT_ROOT]
+        assert policy.read_roots == [sandbox_launch._FRAMEWORK_PACKAGE_ROOT]
+        assert sandbox_launch._FRAMEWORK_PACKAGE_ROOT.name == "omnigent"
+        assert (sandbox_launch._FRAMEWORK_PACKAGE_ROOT / "inner").is_dir()
         assert private.resolve() in policy.write_roots
         assert (private / "data" / "muse").is_dir()
         assert policy.write_files == []
@@ -608,16 +693,68 @@ def test_a_workspace_inside_a_muse_directory_is_not_masked(
     assert workspace.resolve() not in launch.policy.mask_paths
 
 
-def test_a_login_lock_linked_by_an_earlier_version_is_removed(
-    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
+def test_launch_probes_the_sandbox_wrap_with_the_final_policy(
+    tmp_path: Path,
+    resolved: list[tuple[OSEnvSpec, Path]],
+    omnigent_data: Path,
+    backend: _FakeBackend,
 ) -> None:
-    sandbox, private, user, env = _linked_sandbox(tmp_path)
-    os.link(user / ".auth.json.lock", private / ".auth.json.lock")
+    binary = _executable(tmp_path / "muse")
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+    assert sandbox is not None
 
-    sandbox.launch(str(tmp_path / "muse"), ["serve"], env).cleanup()
+    launch = sandbox.launch(str(binary), ["serve"], {"HOME": str(tmp_path)})
+    launch.cleanup()
 
-    assert not (private / ".auth.json.lock").exists()
-    assert (user / ".auth.json.lock").exists()
+    assert backend.wrapped == [
+        (launch.policy, tmp_path.resolve(), str(binary.resolve()))
+    ]
+
+
+def test_a_failing_sandbox_wrap_fails_before_writing_a_launcher(
+    tmp_path: Path,
+    resolved: list[tuple[OSEnvSpec, Path]],
+    omnigent_data: Path,
+    backend: _FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend.error = OSError("dotfile mask scan overflowed")
+    written: list[str] = []
+    monkeypatch.setattr(
+        sandbox_launch, "create_exec_launcher", lambda *a, **k: written.append("x")
+    )
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+    assert sandbox is not None
+
+    with pytest.raises(MuseSandboxError, match="dotfile mask scan overflowed"):
+        sandbox.launch(str(_executable(tmp_path / "muse")), ["serve"], {})
+    assert written == []
+
+
+@pytest.mark.parametrize("layout", ["file", "loop"])
+def test_an_unreadable_user_config_dir_means_logged_out(
+    tmp_path: Path,
+    resolved: list[tuple[OSEnvSpec, Path]],
+    omnigent_data: Path,
+    layout: str,
+) -> None:
+    home = tmp_path / "home"
+    config = home / ".config"
+    config.mkdir(parents=True)
+    if layout == "file":
+        (config / "muse").write_text("not a directory")
+    else:
+        (config / "muse").symlink_to(config / "muse")
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+    assert sandbox is not None
+
+    launch = sandbox.launch(
+        str(_executable(tmp_path / "muse")), ["serve"], {"HOME": str(home)}
+    )
+    launch.cleanup()
+
+    private = sandbox_launch.private_home(tmp_path.resolve()) / "config" / "muse"
+    assert not (private / "auth.json").exists()
 
 
 def test_a_file_write_grant_inside_a_muse_directory_stays_visible(

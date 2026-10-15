@@ -1393,3 +1393,184 @@ async def test_turn_without_relay_keeps_the_plain_idle_timeout() -> None:
     await collect(MuseExecutor(lambda: transport))
 
     assert transport.turns[0]["busy"] is None
+
+
+_FAKE_PROVIDER_KEY = "sk-proj-FakeKey0123456789"
+_FAKE_META_KEY = "meta-test-credential-value"
+
+
+async def test_failed_turn_error_text_is_redacted(monkeypatch) -> None:
+    monkeypatch.setenv("META_API_KEY", _FAKE_META_KEY)
+    transport = FakeTransport(
+        [
+            MuseTurnFinished(
+                "turn-1",
+                "failed",
+                error=(
+                    f"provider rejected key {_FAKE_PROVIDER_KEY}; "
+                    f"Authorization: Bearer abc.def; env={_FAKE_META_KEY}"
+                ),
+                error_kind="providerError",
+            ),
+        ]
+    )
+    [error] = await collect(MuseExecutor(lambda: transport))
+
+    assert isinstance(error, ExecutorError)
+    assert _FAKE_PROVIDER_KEY not in error.message
+    assert _FAKE_META_KEY not in error.message
+    assert "abc.def" not in error.message
+    assert error.message.startswith("provider rejected key [REDACTED]")
+
+
+async def test_cancelled_reason_is_redacted() -> None:
+    transport = FakeTransport(
+        [MuseTurnFinished("turn-1", "cancelled", error=f"aborted {_FAKE_PROVIDER_KEY}")]
+    )
+    [event] = await collect(MuseExecutor(lambda: transport))
+
+    assert isinstance(event, TurnCancelled)
+    assert _FAKE_PROVIDER_KEY not in event.reason
+
+
+async def test_tool_error_is_redacted_but_output_is_untouched() -> None:
+    transport = FakeTransport(
+        [
+            MuseToolCall("c", "shell", {}, "started"),
+            MuseToolCall(
+                "c",
+                "shell",
+                {},
+                "failed",
+                output="key=value",
+                error=f"curl failed: Bearer {_FAKE_PROVIDER_KEY}",
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+    events = await collect(MuseExecutor(lambda: transport))
+
+    [complete] = [event for event in events if isinstance(event, ToolCallComplete)]
+    assert complete.error is not None
+    assert _FAKE_PROVIDER_KEY not in complete.error
+    assert complete.result == "key=value"
+
+
+async def test_transport_and_startup_errors_are_redacted() -> None:
+    class LeakyTransport(FakeTransport):
+        async def run_turn(
+            self,
+            session_id: str,
+            *,
+            text: str,
+            reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
+        ) -> AsyncIterator[MuseEvent]:
+            raise MuseTransportError(f"host said {_FAKE_PROVIDER_KEY}")
+            yield  # pragma: no cover - makes this an async generator
+
+    class LeakyStartTransport(FakeTransport):
+        async def start_session(self, **kwargs: Any) -> str:
+            raise RuntimeError(f"handshake echoed {_FAKE_PROVIDER_KEY}")
+
+    for transport in (LeakyTransport(), LeakyStartTransport()):
+        [error] = await collect(MuseExecutor(lambda transport=transport: transport))
+        assert isinstance(error, ExecutorError)
+        assert _FAKE_PROVIDER_KEY not in error.message
+        assert "[REDACTED]" in error.message
+
+
+async def test_redaction_leaves_ordinary_error_text_unchanged(monkeypatch) -> None:
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    message = "model call failed: context window exceeded (status=400)"
+    transport = FakeTransport([MuseTurnFinished("turn-1", "failed", error=message)])
+    [error] = await collect(MuseExecutor(lambda: transport))
+
+    assert isinstance(error, ExecutorError)
+    assert error.message == message
+
+
+@pytest.mark.parametrize(
+    ("text", "redacted"),
+    [
+        ("stripe said sk_fake_51HxAbC123def", True),
+        ("stripe said sk_fake_4eC39HqLyjWDarjt", True),
+        ("publishable pk_fake_51HxAbC123def", True),
+        ("constraint pk_orders_customer_id violated", False),
+        ("task_1234567890 and risk_threshold_value", False),
+        ("short sk_id here", False),
+    ],
+)
+def test_underscore_prefixed_keys_need_a_digit(text: str, redacted: bool) -> None:
+    from omnigent.community.harness.muse.inner.muse_executor import _redact
+
+    result = _redact(text)
+    assert ("[REDACTED]" in result) is redacted
+    if not redacted:
+        assert result == text
+
+
+async def test_turn_failure_log_line_is_redacted(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("META_API_KEY", _FAKE_META_KEY)
+
+    class CrashingTransport(FakeTransport):
+        async def run_turn(
+            self,
+            session_id: str,
+            *,
+            text: str,
+            reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
+        ) -> AsyncIterator[MuseEvent]:
+            raise RuntimeError(f"boom {_FAKE_META_KEY} sk_fake_51HxAbC123def")
+            yield  # pragma: no cover - makes this an async generator
+
+    with caplog.at_level("ERROR"):
+        await collect(MuseExecutor(lambda: CrashingTransport()))
+
+    [record] = [
+        r for r in caplog.records if r.getMessage().startswith("Muse turn failed")
+    ]
+    logged = record.getMessage()
+    assert "Traceback" in logged
+    assert _FAKE_META_KEY not in logged
+    assert "sk_fake_51HxAbC123def" not in logged
+    assert record.exc_info is None
+
+
+async def test_interrupt_failure_log_line_is_redacted(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("META_API_KEY", _FAKE_META_KEY)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class LeakyInterruptTransport(FakeTransport):
+        async def run_turn(
+            self,
+            session_id: str,
+            *,
+            text: str,
+            reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
+        ) -> AsyncIterator[MuseEvent]:
+            yield MuseTurnStarted("turn-live")
+            started.set()
+            await release.wait()
+            yield MuseTurnFinished("turn-live", "cancelled")
+
+        async def interrupt_turn(self, session_id: str, turn_id: str | None) -> bool:
+            raise RuntimeError(f"interrupt rejected {_FAKE_META_KEY}")
+
+    executor = MuseExecutor(lambda: LeakyInterruptTransport())
+    task = asyncio.create_task(collect(executor))
+    await started.wait()
+    try:
+        with caplog.at_level("DEBUG"):
+            assert await executor.interrupt_session("ignored") is False
+    finally:
+        release.set()
+        await task
+
+    [record] = [
+        r for r in caplog.records if r.getMessage().startswith("Muse interrupt failed")
+    ]
+    assert _FAKE_META_KEY not in record.getMessage()

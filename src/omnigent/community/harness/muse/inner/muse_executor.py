@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -30,6 +33,7 @@ from omnigent.inner.executor import (
     TurnComplete,
     describe_exception,
 )
+from omnigent.process_logging import redact_log_text
 
 from .runtime_config import REASONING_EFFORTS
 
@@ -50,6 +54,25 @@ _AUTH_MISMATCH_HINT = (
     "Muse used provider {active} but the harness is configured for {configured}; "
     "check executor.config.provider / HARNESS_MUSE_PROVIDER and Muse's default provider."
 )
+# Credentials the harness may pass through to `muse serve`; their literal values are
+# scrubbed even when they match none of the shared token shapes.
+_CREDENTIAL_ENV_VARS = ("META_API_KEY",)
+_MIN_CREDENTIAL_LEN = 8
+# Underscore-prefixed keys (sk_live_..., pk_test_...), which the shared patterns only
+# match in their sk- form. Requiring a digit spares names like pk_orders_customer_id.
+_UNDERSCORE_KEY_PATTERN = re.compile(
+    r"\b(?:sk|pk)_(?=[A-Za-z0-9_]*\d)[A-Za-z0-9_]{10,}\b"
+)
+
+
+def _redact(text: str) -> str:
+    """Scrub credentials from host-sourced text before it leaves the executor."""
+    for name in _CREDENTIAL_ENV_VARS:
+        value = os.environ.get(name)
+        if value and len(value) >= _MIN_CREDENTIAL_LEN:
+            text = text.replace(value, "[REDACTED]")
+    text = _UNDERSCORE_KEY_PATTERN.sub("[REDACTED]", text)
+    return redact_log_text(text, include_whitespace_credentials=True)
 
 
 @dataclass(frozen=True)
@@ -560,7 +583,7 @@ class MuseExecutor(Executor):
             cached_name,
             status,
             result=event.output,
-            error=event.error,
+            error=_redact(event.error) if event.error else event.error,
             duration_ms=event.duration_ms,
             metadata={"call_id": event.call_id},
         )
@@ -614,7 +637,9 @@ class MuseExecutor(Executor):
         try:
             session_id = await self._ensure_session(effective_model, tools)
         except Exception as exc:  # noqa: BLE001 - startup failures become terminal events
-            yield ExecutorError(f"Muse startup failed: {describe_exception(exc)}")
+            yield ExecutorError(
+                f"Muse startup failed: {_redact(describe_exception(exc))}"
+            )
             return
 
         if replay:
@@ -662,12 +687,16 @@ class MuseExecutor(Executor):
                             usage=self._usage(event.usage),
                         )
                     elif event.state == "cancelled":
-                        yield TurnCancelled(event.error or "user_cancelled")
+                        yield TurnCancelled(
+                            _redact(event.error) if event.error else "user_cancelled"
+                        )
                     else:
                         # Detect provider-aware authentication failures.
                         auth_message = self._format_auth_error(event.error_kind)
                         error_message = auth_message or (
-                            event.error or f"Muse turn {event.state}"
+                            _redact(event.error)
+                            if event.error
+                            else f"Muse turn {event.state}"
                         )
                         yield ExecutorError(
                             error_message,
@@ -683,13 +712,17 @@ class MuseExecutor(Executor):
             if exc.transport_dead:
                 await self._discard_transport()
             yield ExecutorError(
-                f"Muse transport error: {describe_exception(exc)}",
+                f"Muse transport error: {_redact(describe_exception(exc))}",
                 retryable=exc.retryable,
                 preserve_session=exc.preserve_session,
             )
-        except Exception as exc:
-            logger.exception("Muse turn failed")
-            yield ExecutorError(f"Muse turn failed: {describe_exception(exc)}")
+        except Exception as exc:  # noqa: BLE001 - logged below, with redaction
+            # Core's log formatter applies only the shared patterns, not _redact's.
+            logger.error(
+                "Muse turn failed: %s",
+                _redact("".join(traceback.format_exception(exc))),
+            )
+            yield ExecutorError(f"Muse turn failed: {_redact(describe_exception(exc))}")
         finally:
             self._active_turn_id = None
             self._tool_calls.clear()
@@ -708,10 +741,10 @@ class MuseExecutor(Executor):
         except MuseTransportError as exc:
             if exc.transport_dead:
                 await self._discard_transport()
-            logger.debug("Muse interrupt failed: %s", exc)
+            logger.debug("Muse interrupt failed: %s", _redact(str(exc)))
             return False
         except Exception as exc:  # noqa: BLE001 - interruption is best effort
-            logger.debug("Muse interrupt failed: %s", exc)
+            logger.debug("Muse interrupt failed: %s", _redact(str(exc)))
             return False
 
     async def close_session(self, session_key: str) -> None:

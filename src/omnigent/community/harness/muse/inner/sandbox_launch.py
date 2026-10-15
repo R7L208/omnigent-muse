@@ -9,6 +9,25 @@ platform backend before starting Muse, which puts the whole Muse process tree
 
 Anything that would weaken the requested sandbox fails here instead of
 silently running Muse unconfined.
+
+Only ``linux_bwrap`` is supported. Windows Job Objects are applied from the
+parent after spawn, which this launch path does not do, and Muse does not
+ship for Windows. ``darwin_seatbelt`` confines the tree too, but Muse cannot
+run under Omnigent's Seatbelt profile yet: the profile grants only stat on
+the ancestors of granted paths, while Muse opens each ancestor of its data
+dir (``session/start`` fails with ``UnsafePath``), and it denies
+``~/Library``, which hides the Keychain that holds the Muse login on macOS.
+
+The installer wrapper (``~/.local/bin/muse``) cannot run inside the sandbox:
+it self-updates over the network and reads its state from dotfiles next to
+itself, which the sandbox masks. So the sandbox runs the versioned binary
+the wrapper would exec and reproduces the two things the wrapper hands it,
+``MUSE_NO_AUTO_UPDATE`` and ``MUSE_RELEASE_INFO``.
+
+Sandboxed Muse runs from a private home so nothing it writes (plugins,
+skills, memory, settings) is loaded later by the user's unsandboxed Muse.
+The login is copied in, never linked, so nothing written inside the sandbox
+reaches the user's own login (see :func:`_bridge_login`).
 """
 
 from __future__ import annotations
@@ -18,66 +37,50 @@ import dataclasses
 import errno
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import stat
+import sys
+import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+import omnigent.inner
 from omnigent.inner.datamodel import OSEnvSpec
-from omnigent.inner.sandbox import _project_root
 from omnigent.process_logging import data_dir
 from omnigent.sandbox import (
     SandboxPolicy,
     create_exec_launcher,
+    get_backend,
     resolve_sandbox,
     with_additional_read_roots,
     with_additional_write_roots,
     with_spawn_env_allowlist,
 )
 
-# Backends whose launcher confines the target's descendants. Windows Job
-# Objects are applied from the parent after spawn, which this launch path
-# does not do, and Muse does not ship for Windows.
-#
-# darwin_seatbelt confines the tree too, but Muse cannot run under Omnigent's
-# Seatbelt profile yet: the profile grants only stat on the ancestors of
-# granted paths, while Muse opens each ancestor of its data dir (session/start
-# fails with UnsafePath), and it denies ~/Library outright, which hides the
-# Keychain that holds the Muse login on macOS. Both need core changes; see
-# https://github.com/R7L208/omnigent-muse/issues/23.
+logger = logging.getLogger(__name__)
+
+# Backends whose launcher confines the target's descendants (see module doc).
 SUPPORTED_BACKENDS = frozenset({"linux_bwrap"})
 # The only provider that works without network access.
 OFFLINE_PROVIDERS = frozenset({"echo"})
 # Muse's own shell sandbox needs user namespaces, which the outer sandbox's
 # seccomp profile denies; the outer sandbox is the enforcement boundary.
 DISABLE_NATIVE_SANDBOX = "--disable-sandbox"
-# The installer wrapper (~/.local/bin/muse) cannot run inside the sandbox: it
-# self-updates over the network and reads its state from dotfiles next to
-# itself, which the sandbox masks. So the sandbox runs the versioned binary
-# the wrapper would exec and reproduces the two things the wrapper hands it:
-# MUSE_NO_AUTO_UPDATE (set below) and MUSE_RELEASE_INFO.
+# State the installer wrapper keeps next to the versioned binaries.
 _VERSION_FILE = ".muse-version"
 _RELEASE_INFO_FILE = ".muse-release-info.json"
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?$")
-# Sandboxed Muse runs from a private home so nothing it writes (plugins,
-# skills, memory, settings) is loaded later by the user's unsandboxed Muse.
-# The login is copied in, never linked, so nothing written inside the sandbox
-# reaches the user's own login; a refresh inside the sandbox stays private
-# (see _bridge_login). The login lock is not shared either: the two sides
-# never write the same file, and sandboxed code holding a shared lock could
-# stall the user's own refreshes.
 _LOGIN = "auth.json"
-_LOGIN_LOCK = ".auth.json.lock"
 # Opens a directory without following a symlink planted in its place.
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-# Every XDG base directory Muse may read or write points into the private
-# home, so nothing it caches or records lands in the user's own directories.
-# The values are the XDG defaults relative to $HOME.
+# Every XDG base directory Muse uses points into the private home. The
+# values are the XDG defaults relative to $HOME.
 _XDG_DEFAULTS = {
     "config": ".config",
     "data": ".local/share",
@@ -88,11 +91,9 @@ _XDG_KINDS = tuple(_XDG_DEFAULTS)
 # Copied, so a settings change made inside the sandbox stays there.
 _COPIED_FILES = ("settings.json",)
 _RELEASE_INFO_ENV = "MUSE_RELEASE_INFO"
-# The launcher imports omnigent inside the sandbox from the directory core
-# puts on its sys.path. For an editable install that is a checkout outside
-# the venv, which the sandbox would otherwise hide. Core's own (private)
-# helper keeps the grant and the launcher's sys.path in step.
-_OMNIGENT_IMPORT_ROOT = _project_root()
+# The launcher imports omnigent inside the sandbox, so its package must be
+# readable; for an editable install it is a checkout outside the venv.
+_FRAMEWORK_PACKAGE_ROOT = Path(omnigent.inner.__file__).resolve().parents[1]
 
 
 class MuseSandboxError(RuntimeError):
@@ -163,10 +164,11 @@ def private_home(workspace: Path) -> Path:
     """Return the private Muse home used for sandboxed runs in ``workspace``.
 
     :param workspace: The resolved sandbox workspace, e.g. ``/repo``.
-    :returns: A path such as ``~/.omnigent/muse-sandbox/3f2a9c0d1e4b5a6f``.
+    :returns: A path such as ``~/.omnigent/muse/3f2a9c0d1e4b5a6f...``, named
+        like core's per-harness state directories.
     """
-    digest = hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
-    return data_dir() / "muse-sandbox" / digest
+    digest = hashlib.sha256(str(workspace).encode()).hexdigest()[:32]
+    return data_dir() / "muse" / digest
 
 
 def _mask_around(path: Path, grants: Sequence[Path]) -> list[Path]:
@@ -266,7 +268,9 @@ def _copy_to(src: Path, dir_fd: int, name: str) -> os.stat_result | None:
     """
     try:
         fd = os.open(src, os.O_RDONLY | os.O_CLOEXEC)
-    except (FileNotFoundError, PermissionError):
+    except OSError:
+        # Missing, unreadable, or under a config dir that is a file or a
+        # symlink loop: all mean there is nothing to copy.
         return None
     with os.fdopen(fd, "rb") as data:
         copied = os.fstat(fd)
@@ -293,12 +297,14 @@ def _bridge_login(user: Path, dir_fd: int, records_fd: int, record: str) -> None
     ``auth.json``; that refresh is kept while the user's login is the one
     last copied, and replaced once the user logs in again. Which login was
     last copied is recorded as ``record`` in ``records_fd``, next to the
-    private home rather than in it, so the sandbox cannot edit it.
+    private home rather than in it, so the sandbox cannot edit it. The login
+    lock is not shared: the two sides never write the same file, and
+    sandboxed code holding a shared lock could stall the user's refreshes.
     """
     try:
         current = _identity(user.stat())
         private = os.stat(_LOGIN, dir_fd=dir_fd, follow_symlinks=False)
-    except (FileNotFoundError, PermissionError):
+    except OSError:
         pass
     else:
         if stat.S_ISREG(private.st_mode) and _read_at(records_fd, record) == current:
@@ -312,18 +318,10 @@ def _bridge_login(user: Path, dir_fd: int, records_fd: int, record: str) -> None
         _write_at(records_fd, record, _identity(copied).encode())
 
 
-def _unshare_login_lock(user_config: Path, dir_fd: int) -> None:
-    """Remove a login lock hard-linked in by an earlier version of this harness."""
-    with contextlib.suppress(FileNotFoundError, PermissionError):
-        private = os.stat(_LOGIN_LOCK, dir_fd=dir_fd, follow_symlinks=False)
-        if os.path.samestat(private, (user_config / _LOGIN_LOCK).stat()):
-            os.unlink(_LOGIN_LOCK, dir_fd=dir_fd)
-
-
 def _prepare_private_home(home: Path, user_config: Path) -> None:
     """Lay out the private home and bridge the user's login and settings.
 
-    :param home: The private home, e.g. ``~/.omnigent/muse-sandbox/<digest>``.
+    :param home: The private home, e.g. ``~/.omnigent/muse/<digest>``.
     :param user_config: The user's Muse config directory.
     """
     home.parent.mkdir(parents=True, exist_ok=True)
@@ -340,7 +338,6 @@ def _prepare_private_home(home: Path, user_config: Path) -> None:
         kinds = {kind: track(_open_private_dir(home_fd, kind)) for kind in _XDG_KINDS}
         track(_open_private_dir(kinds["data"], "muse"))
         config_fd = track(_open_private_dir(kinds["config"], "muse"))
-        _unshare_login_lock(user_config, config_fd)
         _bridge_login(user_config / _LOGIN, config_fd, homes_fd, f"{home.name}.login")
         for name in _COPIED_FILES:
             if _copy_to(user_config / name, config_fd, name) is None:
@@ -401,18 +398,25 @@ class MuseSandbox:
         if not policy.active:
             return None
         spec = os_env.sandbox
-        if spec is not None and (spec.egress_rules or spec.credential_proxy):
-            # Nothing on the exec-launcher path starts Omnigent's egress
-            # proxy, so these would leave the network unrestricted.
+        unsupported = [
+            name
+            for name in ("egress_rules", "credential_proxy", "git_ssh")
+            if spec is not None and getattr(spec, name, None)
+        ]
+        if unsupported:
+            # Each needs a helper started by the parent (the egress proxy or
+            # the git SSH relay), which this harness does not start yet.
             raise MuseSandboxError(
-                "os_env.sandbox.egress_rules and credential_proxy are not "
-                "supported for Muse: nothing starts the egress proxy, so the "
-                "network would be unrestricted; remove them, or set "
-                "allow_network: false with the 'echo' provider"
+                f"os_env.sandbox.{', '.join(unsupported)} not yet supported "
+                "for Muse: this harness does not start the egress proxy or "
+                "git SSH relay they need (see "
+                "https://github.com/R7L208/omnigent-muse/issues/30); remove "
+                "them, or set allow_network: false with the 'echo' provider"
             )
         if policy.backend_type == "darwin_seatbelt":
             raise MuseSandboxError(
-                "Muse cannot run under the darwin_seatbelt sandbox yet; use "
+                "Muse cannot run under the darwin_seatbelt sandbox yet (an "
+                "omitted sandbox type or 'auto' selects it on macOS); use "
                 "sandbox type 'none' on macOS"
             )
         if policy.backend_type not in SUPPORTED_BACKENDS:
@@ -427,6 +431,21 @@ class MuseSandbox:
                 f"{provider or 'default'!r} needs network access; allow network "
                 "or use the 'echo' provider"
             )
+        # create_exec_launcher refuses these at spawn; fail at startup instead.
+        launcher_dir = Path(tempfile.gettempdir()).resolve()
+        for root in (*policy.write_roots, *policy.write_files):
+            if launcher_dir.is_relative_to(root.resolve()):
+                raise MuseSandboxError(
+                    f"os_env.sandbox write grant {str(root)!r} covers the "
+                    f"temporary directory {str(launcher_dir)!r} that holds the "
+                    "sandbox launcher; grant a narrower directory"
+                )
+        logger.info(
+            "Sandboxing Muse with %s in workspace %s, private home %s",
+            policy.backend_type,
+            workspace,
+            private_home(workspace),
+        )
         return cls(policy, workspace)
 
     def launch(
@@ -437,7 +456,8 @@ class MuseSandbox:
         :param executable: Muse command name or path, e.g. ``"muse"``.
         :param args: Arguments after the executable, e.g. ``["serve"]``.
         :param env: The already-filtered environment for the Muse process.
-        :raises MuseSandboxError: The Muse binary cannot be resolved.
+        :raises MuseSandboxError: The Muse binary cannot be resolved, or the
+            backend cannot wrap it under this policy.
         :raises OSError: The private home or launcher cannot be written.
         """
         binary = resolve_muse_binary(executable)
@@ -454,7 +474,7 @@ class MuseSandbox:
             spawn_env.pop(_RELEASE_INFO_ENV, None)
         else:
             spawn_env[_RELEASE_INFO_ENV] = info
-        policy = with_additional_read_roots(self._policy, [_OMNIGENT_IMPORT_ROOT])
+        policy = with_additional_read_roots(self._policy, [_FRAMEWORK_PACKAGE_ROOT])
         # Grant the home itself: the backends mask dotfiles only at the top
         # level of a granted root, so Muse's lock files below stay visible.
         policy = with_additional_write_roots(policy, [home])
@@ -475,12 +495,23 @@ class MuseSandbox:
         masks = [
             path
             for kind in _XDG_KINDS
-            for path in _mask_around(_user_muse_dir(env, kind).resolve(), grants)
+            # realpath: Path.resolve() raises on a symlink loop before 3.13.
+            for path in _mask_around(
+                Path(os.path.realpath(_user_muse_dir(env, kind))), grants
+            )
         ]
         policy = dataclasses.replace(
             policy, mask_paths=[*(policy.mask_paths or []), *masks]
         )
         policy = with_spawn_env_allowlist(policy, list(spawn_env))
+        # The launcher wraps at run time, where a failure only shows as an
+        # "initialize failed" with the host's stderr tail; probe it here.
+        try:
+            get_backend(policy.backend_type).wrap_launcher_argv(
+                [sys.executable, "-c", "pass"], policy, self._workspace, target=binary
+            )
+        except OSError as exc:
+            raise MuseSandboxError(f"cannot sandbox Muse: {exc}") from exc
         launcher = create_exec_launcher(binary, policy, cwd=str(self._workspace))
         return MuseLaunch(
             argv=(launcher, *args, DISABLE_NATIVE_SANDBOX),

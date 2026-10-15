@@ -23,14 +23,12 @@ import logging
 import os
 import random
 import re
-import signal
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Self
 
-import psutil
 from omnigent.inner import _proc
 
 logger = logging.getLogger(__name__)
@@ -175,60 +173,38 @@ async def _wait_exit(proc: asyncio.subprocess.Process, timeout: float) -> bool:
     return proc.returncode is not None
 
 
-def _group_members(pgid: int) -> list[psutil.Process]:
-    """Return the live processes in process group ``pgid``.
+def _group_alive(pgid: int) -> bool:
+    """Whether process group ``pgid`` still has members we may signal.
 
-    The host is spawned in its own session, so its group id is its pid. While
-    any member is alive the kernel will not reuse that id, so every process
-    found here descends from the host, even after the host itself has exited.
+    Only gates how long shutdown waits; signals go through core, which
+    checks the group is still ours.
     """
-    if not hasattr(os, "getpgid"):
-        return []
-    members: list[psutil.Process] = []
-    for process in psutil.process_iter():
-        with contextlib.suppress(psutil.Error, OSError):
-            if os.getpgid(process.pid) == pgid:
-                members.append(process)
-    return members
-
-
-def _signal_group(pgid: int, sig: int) -> None:
-    """Send ``sig`` to group ``pgid`` if it still has members."""
     killpg = getattr(os, "killpg", None)
-    if killpg is not None and _group_members(pgid):
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            killpg(pgid, sig)
+    if killpg is None or pgid <= 1:
+        return False
+    try:
+        killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
-async def _wait_gone(processes: Sequence[psutil.Process], timeout: float) -> None:
-    """Wait, without blocking the loop, for ``processes`` to exit."""
+async def _stop_tree(proc: asyncio.subprocess.Process, grace: float) -> None:
+    """SIGTERM the host's process tree, then SIGKILL whatever outlives ``grace``.
 
-    def alive(process: psutil.Process) -> bool:
-        try:
-            return process.status() != psutil.STATUS_ZOMBIE
-        except psutil.Error:
-            return False
-
-    deadline = time.monotonic() + timeout
-    while any(map(alive, processes)) and time.monotonic() < deadline:
-        await asyncio.sleep(0.05)
-
-
-async def _stop_tree(proc: asyncio.subprocess.Process) -> None:
-    """SIGTERM the host's process tree, then SIGKILL whatever outlives grace.
-
-    The group is signalled even when the host has already exited (on stdin
-    EOF, or a crash): its descendants, a backgrounded shell job say, outlive
-    it unless a PID namespace reaps them, and macOS has none.
+    Runs even when the host has already exited (on stdin EOF, or a crash):
+    its descendants, a backgrounded shell job say, outlive it unless a PID
+    namespace reaps them, and macOS has none. Core signals the group recorded
+    at spawn only while a process it observed is still in it, so a reused pid
+    never redirects the signal.
     """
-    group = _group_members(proc.pid)
-    # Core covers a live leader on every platform (Windows has no groups).
     _proc.terminate_tree(proc)
-    _signal_group(proc.pid, signal.SIGTERM)
-    await _wait_exit(proc, 10)
-    await _wait_gone(group, 5)
+    deadline = time.monotonic() + grace
+    while (proc.returncode is None or _group_alive(proc.pid)) and (
+        time.monotonic() < deadline
+    ):
+        await asyncio.sleep(0.05)
     _proc.kill_tree(proc)
-    _signal_group(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 class MspClient:
@@ -349,6 +325,7 @@ class MspClient:
             )
         except OSError as exc:
             raise MspConnectionClosed(f"could not spawn {argv[0]!r}: {exc}") from exc
+        _proc.remember_process_group(proc)
         return await cls._create(
             proc,
             init_timeout=init_timeout,
@@ -398,6 +375,9 @@ class MspClient:
             self.host_version,
             self.fingerprint,
         )
+        # Core reaps a group whose leader has exited only while a process
+        # it observed is still in it, so record the tree as it stands now.
+        _proc.refresh_process_tree(self._proc)
         self.notify("initialized")
 
     def _startup_error_message(self, exc: BaseException) -> str:
@@ -804,15 +784,16 @@ class MspClient:
         self._writer_task.cancel()
         try:
             if proc is not None and proc.returncode is None and proc.stdin is not None:
+                _proc.refresh_process_tree(proc)
                 with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                     proc.stdin.close()
                 await _wait_exit(proc, 30)
             if proc is not None:
-                await _stop_tree(proc)
-                # wait() also waits for the stdio pipes, which a descendant
-                # that left the process group can hold open indefinitely.
+                await _stop_tree(proc, grace=10)
+                # The tree is dead by now; wait() also waits for the stdio
+                # pipes, which a descendant that left the group can hold open.
                 with contextlib.suppress(OSError, TimeoutError):
-                    async with asyncio.timeout(10):
+                    async with asyncio.timeout(2):
                         await proc.wait()
         finally:
             self._finish(MspConnectionClosed(f"{self._label}: client closed"))
@@ -911,6 +892,8 @@ class MspClient:
         if display_text is not None:
             params["displayText"] = display_text
         command_id = mint_command_id()
+        # Picks up descendants an earlier turn left running (see _stop_tree).
+        _proc.refresh_process_tree(self._proc)
         await self.command("turn/start", params, command_id=command_id, timeout=timeout)
         return command_id
 

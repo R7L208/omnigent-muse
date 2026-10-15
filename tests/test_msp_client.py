@@ -551,13 +551,21 @@ async def test_subscribers_all_see_notifications(tmp_path: Path) -> None:
         seen_b: list[str] = []
         unsub_a = client.subscribe(lambda method, params: seen_a.append(method))
         client.subscribe(lambda method, params: seen_b.append(method))
+
+        # The host notifies after it responds, so wait for the notification.
+        async def started(seen: list[str], count: int) -> None:
+            while seen.count("session/started") < count:
+                await asyncio.sleep(0.01)
+
         await client.start_session()
-        assert "session/started" in seen_a
-        assert "session/started" in seen_b
+        async with asyncio.timeout(5):
+            await started(seen_a, 1)
+            await started(seen_b, 1)
         unsub_a()
         await client.start_session()
+        async with asyncio.timeout(5):
+            await started(seen_b, 2)
         assert seen_a.count("session/started") == 1
-        assert seen_b.count("session/started") == 2
     finally:
         await client.close()
 
