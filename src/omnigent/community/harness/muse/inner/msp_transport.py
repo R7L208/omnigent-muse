@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 from omnigent.inner.agent_env import clean_agent_env
@@ -16,6 +19,7 @@ from .msp_client import (
     MspClient,
     MspConnectionClosed,
     MspError,
+    MspEvent,
     MspItemUpdate,
     MspProtocolError,
     MspTextDelta,
@@ -34,9 +38,14 @@ from .muse_executor import (
     MuseTurnStarted,
 )
 from .runtime_config import PROVIDERS
+from .sandbox_launch import MuseLaunch, MuseSandbox, MuseSandboxError
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
+# Muse's approval verbs, normalized to the executor's allow/deny. Only the
+# one-shot approval maps to "allow"; session-wide and persisted grants keep
+# their own names, so a policy verdict can never select them.
+_HOST_DECISIONS = {"approved": "allow", "abort": "deny", "denied": "deny"}
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +69,22 @@ def _first_str(*values: object) -> str | None:
     return next((value for value in values if isinstance(value, str) and value), None)
 
 
+def _raw_args(raw: JsonObject, default: object) -> object:
+    """Decode Muse's ``rawArgs`` JSON string, else return ``default``."""
+    text = raw.get("rawArgs")
+    if not isinstance(text, str):
+        return default
+    try:
+        return json.loads(text)
+    except ValueError:
+        return default
+
+
+def _cleanup_abandoned_launch(task: asyncio.Future[MuseLaunch]) -> None:
+    if not task.cancelled() and task.exception() is None:
+        task.result().cleanup()
+
+
 class MspTransport:
     """Adapt one owned ``muse serve`` process to executor-level events."""
 
@@ -73,9 +98,19 @@ class MspTransport:
         env_passthrough: Sequence[str] = (),
         provider: str | None = None,
         idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
+        sandbox: MuseSandbox | None = None,
     ) -> None:
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be greater than zero")
+        if (
+            sandbox is not None
+            and cwd is not None
+            and Path(cwd).resolve() != sandbox.workspace
+        ):
+            raise ValueError(
+                f"cwd {cwd!r} differs from the sandbox workspace "
+                f"{str(sandbox.workspace)!r}; a sandboxed Muse runs in its workspace"
+            )
         self._client = client
         self._executable = executable
         self._cwd = cwd
@@ -83,6 +118,8 @@ class MspTransport:
         self._env_passthrough = tuple(env_passthrough)
         self._provider = provider
         self._idle_timeout = idle_timeout
+        self._sandbox = sandbox
+        self._spawn_lock = asyncio.Lock()
         self._approval_requirements: dict[tuple[str, str], JsonObject] = {}
         self._item_kinds: dict[str, str] = {}
         self._active_provider: str | None = None
@@ -97,44 +134,66 @@ class MspTransport:
         env_passthrough: Sequence[str] = (),
         provider: str | None = None,
         idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
+        sandbox: MuseSandbox | None = None,
     ) -> MspTransport:
-        binary = executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
-        argv = [binary, "serve"]
-        if provider is not None:
-            argv.extend(("--provider", provider))
-        client = await MspClient.spawn(
-            argv,
-            cwd=cwd,
-            env=clean_agent_env(extra_allowed=env_passthrough, source=env),
-            client_version=_package_version(),
-            client_title="Omnigent Muse",
-        )
-        return cls(
-            client,
+        transport = cls(
             executable=executable,
             cwd=cwd,
             env=env,
             env_passthrough=env_passthrough,
             provider=provider,
             idle_timeout=idle_timeout,
+            sandbox=sandbox,
         )
+        transport._client = await transport._spawn_client()
+        return transport
 
     async def _get_client(self) -> MspClient:
-        if self._client is None:
-            binary = self._executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
-            argv = [binary, "serve"]
-            if self._provider is not None:
-                argv.extend(("--provider", self._provider))
-            self._client = await MspClient.spawn(
+        # Concurrent callers after a respawn must share one host, not each
+        # start (and leak) their own.
+        async with self._spawn_lock:
+            if self._client is None:
+                self._client = await self._spawn_client()
+            return self._client
+
+    async def _spawn_client(self) -> MspClient:
+        binary = self._executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
+        args = ["serve"]
+        if self._provider is not None:
+            args.extend(("--provider", self._provider))
+        env = clean_agent_env(extra_allowed=self._env_passthrough, source=self._env)
+        argv, cwd = [binary, *args], self._cwd
+        cleanup: Callable[[], None] | None = None
+        if self._sandbox is not None:
+            # Rebuilt from the same resolved sandbox on every (re)spawn. The
+            # launch does file work (login copy, launcher script), so it
+            # runs off the event loop.
+            pending = asyncio.ensure_future(
+                asyncio.to_thread(self._sandbox.launch, binary, args, env)
+            )
+            try:
+                launch = await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                # The thread still finishes; remove the launcher it writes.
+                pending.add_done_callback(_cleanup_abandoned_launch)
+                raise
+            except (MuseSandboxError, OSError) as exc:
+                raise MuseTransportError(
+                    f"cannot launch sandboxed Muse: {exc}", transport_dead=True
+                ) from exc
+            argv, cwd, env = list(launch.argv), launch.cwd, launch.env
+            cleanup = launch.cleanup
+        try:
+            return await MspClient.spawn(
                 argv,
-                cwd=self._cwd,
-                env=clean_agent_env(
-                    extra_allowed=self._env_passthrough, source=self._env
-                ),
+                cwd=cwd,
+                env=env,
                 client_version=_package_version(),
                 client_title="Omnigent Muse",
             )
-        return self._client
+        finally:
+            if cleanup is not None:
+                cleanup()
 
     @property
     def active_provider(self) -> str | None:
@@ -147,6 +206,7 @@ class MspTransport:
         workspace_root: str | None,
         model: str | None,
         approval_mode: str,
+        mcp_servers: dict[str, JsonObject] | None = None,
     ) -> str:
         try:
             client = await self._get_client()
@@ -154,6 +214,7 @@ class MspTransport:
                 workspace_root=workspace_root,
                 model_id=model,
                 approval_mode=approval_mode,
+                mcp_servers=mcp_servers,
             )
             session_id = _first_str(session.get("sessionId"), session.get("id"))
             if session_id is None:
@@ -173,7 +234,14 @@ class MspTransport:
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]:
+        """Run one turn, failing if Muse is silent for the idle timeout.
+
+        :param busy: Returns whether work Muse is waiting on is still in
+            progress (a relayed Omnigent call); the idle timeout does not
+            fire while it returns true.
+        """
         try:
             client = await self._get_client()
             with client.open_stream(session_id) as stream:
@@ -192,15 +260,9 @@ class MspTransport:
                 events = stream.follow(turn_id)
                 while True:
                     try:
-                        async with asyncio.timeout(self._idle_timeout):
-                            event = await anext(events)
+                        event = await self._next_event(events, busy)
                     except StopAsyncIteration:
                         break
-                    except TimeoutError as exc:
-                        raise MuseTransportError(
-                            f"Muse turn produced no events for {self._idle_timeout:g}s",
-                            retryable=True,
-                        ) from exc
                     if isinstance(event, MspTextDelta):
                         kind = self._item_kinds.get(event.item_id)
                         if kind == "reasoning" or (
@@ -251,6 +313,28 @@ class MspTransport:
                         )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
             raise await self._handle_error(exc) from exc
+
+    async def _next_event(
+        self, events: AsyncIterator[MspEvent], busy: Callable[[], bool] | None
+    ) -> MspEvent:
+        # Waits on one task rather than cancelling on each timeout: cancelling
+        # anext() would close the stream while a busy turn is still running.
+        pending = asyncio.ensure_future(anext(events))
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=self._idle_timeout)
+                if done:
+                    return pending.result()
+                if busy is None or not busy():
+                    raise MuseTransportError(
+                        f"Muse turn produced no events for {self._idle_timeout:g}s",
+                        retryable=True,
+                    )
+        finally:
+            if not pending.done():
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await pending
 
     async def decide_approval(
         self, session_id: str, approval_id: str, choice_id: str
@@ -343,10 +427,14 @@ class MspTransport:
                 label = (
                     _first_str(choice.get("label"), choice.get("title")) or choice_id
                 )
-                decision = _first_str(
-                    choice.get("decision"), choice.get("kind"), choice.get("value")
-                ) or self._decision(choice_id)
-                choices.append(MuseApprovalChoice(choice_id, label, decision.lower()))
+                decision = (
+                    _first_str(
+                        choice.get("decision"), choice.get("kind"), choice.get("value")
+                    )
+                    or self._decision(choice_id)
+                ).lower()
+                decision = _HOST_DECISIONS.get(decision, decision)
+                choices.append(MuseApprovalChoice(choice_id, label, decision))
         return MuseApprovalRequested(
             approval_id=event.approval_id,
             tool_name=_first_str(
@@ -361,7 +449,10 @@ class MspTransport:
                 raw.get(
                     "arguments",
                     requirement.get(
-                        "arguments", approval.get("arguments", raw.get("subject", {}))
+                        "arguments",
+                        approval.get(
+                            "arguments", _raw_args(raw, raw.get("subject", {}))
+                        ),
                     ),
                 ),
             ),
