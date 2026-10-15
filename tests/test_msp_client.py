@@ -16,6 +16,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from omnigent.community.harness.muse.inner.msp_client import (
@@ -472,6 +473,69 @@ async def test_close_reaps_child(tmp_path: Path) -> None:
     await client.close()  # idempotent
 
 
+def _host_with_child(tmp_path: Path, child: str) -> Path:
+    """Write a host that starts ``child`` in the background, then serves MSP."""
+    host = tmp_path / "host.sh"
+    host.write_text(
+        "#!/bin/sh\n"
+        f'{child} & echo $! > "{tmp_path}/child.pid"\n'
+        f"exec {sys.executable} -u {FAKE_HOST}\n"
+    )
+    host.chmod(0o755)
+    return host
+
+
+def _child(tmp_path: Path) -> psutil.Process:
+    return psutil.Process(int((tmp_path / "child.pid").read_text()))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+async def test_close_reaps_descendants_after_host_exits(tmp_path: Path) -> None:
+    # The host exits cleanly on stdin EOF, leaving a backgrounded child behind.
+    host = _host_with_child(tmp_path, "sleep 300")
+    client = await MspClient.spawn([str(host)], env=_spawn_env(tmp_path), label="test")
+    child = _child(tmp_path)
+    await client.close()
+    assert client._proc.returncode == 0
+    _, alive = psutil.wait_procs([child], timeout=10)
+    assert alive == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+async def test_close_reaps_descendants_of_a_crashed_host(tmp_path: Path) -> None:
+    host = _host_with_child(tmp_path, "sleep 300")
+    client = await MspClient.spawn(
+        [str(host)],
+        env=_spawn_env(tmp_path, FAKE_MSP_SCENARIO="die_after_init"),
+        label="test",
+    )
+    child = _child(tmp_path)
+    for _ in range(200):
+        if client._proc.returncode is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert client._proc.returncode is not None
+    await client.close()
+    _, alive = psutil.wait_procs([child], timeout=10)
+    assert alive == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+async def test_close_gives_descendants_a_grace_period(tmp_path: Path) -> None:
+    done = tmp_path / "flushed"
+    host = _host_with_child(
+        tmp_path,
+        f'sh -c \'trap "sleep 0.3; echo ok > {done}; exit 0" TERM; '
+        "while :; do sleep 0.05; done'",
+    )
+    client = await MspClient.spawn([str(host)], env=_spawn_env(tmp_path), label="test")
+    child = _child(tmp_path)
+    await client.close()
+    _, alive = psutil.wait_procs([child], timeout=10)
+    assert alive == []
+    assert done.read_text() == "ok\n"
+
+
 async def test_banner_line_tolerated(tmp_path: Path) -> None:
     client = await _spawn(tmp_path, FAKE_MSP_SCENARIO="banner")
     try:
@@ -487,13 +551,21 @@ async def test_subscribers_all_see_notifications(tmp_path: Path) -> None:
         seen_b: list[str] = []
         unsub_a = client.subscribe(lambda method, params: seen_a.append(method))
         client.subscribe(lambda method, params: seen_b.append(method))
+
+        # The host notifies after it responds, so wait for the notification.
+        async def started(seen: list[str], count: int) -> None:
+            while seen.count("session/started") < count:
+                await asyncio.sleep(0.01)
+
         await client.start_session()
-        assert "session/started" in seen_a
-        assert "session/started" in seen_b
+        async with asyncio.timeout(5):
+            await started(seen_a, 1)
+            await started(seen_b, 1)
         unsub_a()
         await client.start_session()
+        async with asyncio.timeout(5):
+            await started(seen_b, 2)
         assert seen_a.count("session/started") == 1
-        assert seen_b.count("session/started") == 2
     finally:
         await client.close()
 

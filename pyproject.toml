@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"          # match omnigent (the Muse SDK itself is 3.10+)
 license = "Apache-2.0"
 dependencies = [
-  "omnigent>=0.15.0,<1",            # first release with all imported harness APIs
+  "omnigent>=0.16.0,<1",            # first release with all imported harness and sandbox APIs
 ]
 
 [dependency-groups]
