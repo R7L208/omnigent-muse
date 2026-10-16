@@ -9,9 +9,13 @@
 #   https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=<VERSION>&file=manifest.json
 # (artifacts.<platform>.checksum); bump all three values together.
 #
-# Env in:  MUSE_INSTALL_DIR (default: $RUNNER_TEMP/muse, else ~/.local/bin).
-# Env out: OMNIGENT_MUSE_PATH and MUSE_NO_AUTO_UPDATE, appended to
-#          $GITHUB_ENV when set.
+# The release binary has no self-update logic of its own; only the
+# installer's `muse` launcher updates (and honors MUSE_NO_AUTO_UPDATE).
+#
+# Env in:  MUSE_INSTALL_DIR (default: $RUNNER_TEMP/muse, else
+#          ${XDG_CACHE_HOME:-~/.cache}/omnigent-muse/muse). The fallback stays
+#          clear of ~/.local/bin/muse, where the installer puts its launcher.
+# Env out: OMNIGENT_MUSE_PATH, appended to $GITHUB_ENV when set.
 
 set -euo pipefail
 
@@ -32,7 +36,7 @@ case "$(uname -s):$(uname -m)" in
     ;;
 esac
 
-install_dir="${MUSE_INSTALL_DIR:-${RUNNER_TEMP:-$HOME/.local/bin}/muse}"
+install_dir="${MUSE_INSTALL_DIR:-${RUNNER_TEMP:-${XDG_CACHE_HOME:-$HOME/.cache}/omnigent-muse}/muse}"
 binary="$install_dir/muse-bin-$MUSE_VERSION"
 url="https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=$MUSE_VERSION&file=$artifact"
 
@@ -50,7 +54,6 @@ if ! echo "$sha256  $binary" | sha256sum --check --strict --status; then
 fi
 chmod 0755 "$binary"
 
-export MUSE_NO_AUTO_UPDATE=1
 reported="$("$binary" --version)"
 if [[ "$reported" != *"($MUSE_VERSION)"* ]]; then
   echo "::error::expected Muse $MUSE_VERSION, binary reports: $reported" >&2
@@ -59,8 +62,5 @@ fi
 echo "Installed $reported at $binary"
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  {
-    echo "OMNIGENT_MUSE_PATH=$binary"
-    echo "MUSE_NO_AUTO_UPDATE=1"
-  } >> "$GITHUB_ENV"
+  echo "OMNIGENT_MUSE_PATH=$binary" >> "$GITHUB_ENV"
 fi

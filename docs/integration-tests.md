@@ -75,4 +75,13 @@ just integration    # needs muse on PATH, or OMNIGENT_MUSE_PATH=/path/to/muse
 
 Without `OMNIGENT_MUSE_INTEGRATION=1` (which the recipe sets) the tests are
 skipped, so `just test` stays offline. With it set, a missing `muse` binary
-fails the run instead of skipping.
+fails the run instead of skipping. Either the installer's `muse` launcher or a
+release binary works; the tests pass `MUSE_NO_AUTO_UPDATE=1` through so the
+launcher doesn't update itself mid-run.
+
+The tests give Muse a private `HOME`, which hides a login stored in files
+(Linux, and the macOS fallback). On macOS, though, `muse login` normally
+stores Meta credentials in the Keychain, which a private `HOME` does not
+hide. If you are logged in there, Muse may authenticate and
+`test_unauthenticated_provider_fails_the_turn` can fail locally. CI runs on
+Linux with no stored credentials and isn't affected.

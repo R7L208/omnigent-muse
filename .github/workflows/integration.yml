@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: integration-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: integration-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 env:
@@ -94,11 +94,14 @@ jobs:
 
       - name: Install Omnigent and the plugin wheel
         # Non-editable on purpose: the runner must load the plugin the way a
-        # user's install does, with no local source override.
+        # user's install does, with no local source override. Omnigent's own
+        # dependencies resolve fresh, as for a user; the test tools match
+        # uv.lock so the unit and integration suites run the same versions.
         run: |
           uv venv "$RUNNER_TEMP/venv" --python 3.12
           uv pip install --python "$RUNNER_TEMP/venv/bin/python" \
-            ./omnigent "$RUNNER_TEMP"/dist/*.whl pytest pytest-asyncio
+            ./omnigent "$RUNNER_TEMP"/dist/*.whl \
+            pytest==9.1.1 pytest-asyncio==1.4.0
 
       - name: Verify installed plugin discovery
         working-directory: ${{ runner.temp }}
