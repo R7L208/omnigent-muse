@@ -87,6 +87,7 @@ jobs:
         working-directory: omnigent-muse
         run: |
           bash -n \
+            .github/scripts/install-muse.sh \
             .github/scripts/merge-ready/load-maintainers.sh \
             .github/scripts/security-scan/sensitive-paths.sh \
             .github/scripts/security-scan/should-scan.sh

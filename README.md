@@ -39,11 +39,16 @@ python -c "from omnigent.harness_plugins import plugin_state; print(plugin_state
 pytest -q
 ```
 
+`just integration` runs a real `muse serve` through Omnigent's harness runner
+using the credential-free `echo` provider; see
+[docs/integration-tests.md](docs/integration-tests.md).
+
 ## Requirements
 
 - `muse` CLI on PATH (or set `OMNIGENT_MUSE_PATH`). Install: `curl -fsSL https://dev.meta.ai/install.sh | bash`.
-- Transport verified live against `muse` 1.4.0 (echo provider). The client records
-  the served schema fingerprint without gating on it.
+- CI runs the harness against a pinned `muse` (currently 1.4.8-R6256.1, echo
+  provider). The client records the served schema fingerprint without gating
+  on it.
 
 ## Runtime configuration
 
