@@ -44,9 +44,9 @@ jobs:
       fail-fast: false
       matrix:
         omnigent:
-          # Minimum supported release (pyproject: omnigent>=0.15.0), by commit.
-          - name: "0.15.0"
-            ref: c8b9b85f822f2c9203ff995c10f3cc49d064bbe5
+          # Minimum supported release (pyproject: omnigent>=0.16.0), by commit.
+          - name: "0.16.0"
+            ref: 82a74473ee4c01163c4269f4296b10a158f0e47e
           - name: main
             ref: main
 

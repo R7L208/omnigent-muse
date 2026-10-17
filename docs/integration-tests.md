@@ -55,7 +55,7 @@ protocol, these tests can be added.
 `.github/workflows/integration.yml` runs on pull requests, pushes to `main`,
 the weekly schedule, and manual dispatch. It runs behind
 `security-gate.yml`, declares no secrets, and blanks provider credentials. The
-matrix covers the minimum supported Omnigent release (0.15.0, pinned by
+matrix covers the minimum supported Omnigent release (0.16.0, pinned by
 commit) and Omnigent `main`. Omnigent and the built plugin wheel are installed
 non-editable into a fresh virtual environment, with no local source override.
 
