@@ -24,6 +24,26 @@ ensure:
     fi
     OMNIGENT_SKIP_WEB_UI=true UV_INDEX_URL="$index_url" uv sync --group dev
 
+# Test against the sibling Omnigent checkout instead of the released Omnigent
+# from uv.lock, as CI's unit job does with Omnigent main. Non-editable, so
+# Pyrefly can see it: rerun after pulling ../omnigent, and after `just ensure`,
+# which reverts to the lock.
+[group('setup')]
+core-sibling:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    index_url="${UV_INDEX_URL:-}"
+    if [[ -z "$index_url" && -f "{{registry-config}}" ]]; then
+        index_url="$(.venv/bin/python -c 'import sys, tomllib; data = tomllib.load(open(sys.argv[1], "rb")); print(next(index["url"] for index in data["tool"]["uv"]["index"] if index.get("default")))' "{{registry-config}}")"
+    fi
+    if [[ -z "$index_url" ]]; then
+        echo "No package index configured. Set UV_INDEX_URL in .env or OMNIGENT_PYPI_CONFIG to a pyproject with a default uv index." >&2
+        exit 2
+    fi
+    OMNIGENT_SKIP_WEB_UI=true UV_INDEX_URL="$index_url" \
+        uv pip install --python .venv/bin/python \
+        --reinstall-package omnigent --no-editable {{core-dir}}
+
 # Run the offline unit suite.
 [group('check')]
 test:

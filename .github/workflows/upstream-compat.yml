@@ -71,7 +71,12 @@ jobs:
 
       - name: Install plugin with dependency heads
         working-directory: omnigent-muse
-        run: uv sync --group dev
+        # uv.lock pins released Omnigent; replace it with main, non-editable
+        # as `just core-sibling` does locally.
+        run: |
+          uv sync --group dev
+          uv pip install --python .venv/bin/python \
+            --reinstall-package omnigent --no-editable ../omnigent
 
       - name: Run tests
         working-directory: omnigent-muse

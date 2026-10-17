@@ -1,0 +1,119 @@
+# Releasing omnigent-muse
+
+A release is a version-bump PR, then a GitHub Release. Publishing the Release
+runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
+
+1. checks that the tag is exactly `v<project.version>`, and that the GitHub
+   pre-release flag matches the version;
+2. builds the wheel and sdist once, and checks them with `twine check` and
+   [`check-release.py`](.github/scripts/release/check-release.py) (plugin
+   modules, entry point, Omnigent dependency bounds, no namespace
+   `__init__.py` that would shadow core, no `[tool.uv.sources]` override);
+3. installs that wheel in a clean environment with the minimum supported
+   Omnigent (0.16.0) and the latest release from PyPI. In each one it checks
+   plugin discovery from outside the checkout, then runs the unit suite and
+   the credential-free `echo` integration tests against the installed wheel;
+4. attaches the same files to the GitHub Release;
+5. publishes the same files through Trusted Publishing: final versions to PyPI
+   (environment `pypi`), pre-releases to TestPyPI (environment `testpypi`);
+6. checks that the index serves files with the same sha256 digests, then
+   installs the release from the index and runs the `echo` tests again.
+
+No step uses a long-lived token. Only the publish job can mint an OIDC token,
+and only after the environment's reviewer approves it.
+
+## First-time setup
+
+Do this once, before the first release.
+
+1. **Check the name.** Confirm `omnigent-muse` is still free on
+   [PyPI](https://pypi.org/project/omnigent-muse/) and
+   [TestPyPI](https://test.pypi.org/project/omnigent-muse/).
+2. **Add pending publishers.** In your
+   [PyPI publishing settings](https://pypi.org/manage/account/publishing/) and
+   in the [TestPyPI ones](https://test.pypi.org/manage/account/publishing/),
+   add a GitHub pending publisher:
+
+   | Field | PyPI | TestPyPI |
+   |-------|------|----------|
+   | PyPI project name | `omnigent-muse` | `omnigent-muse` |
+   | Owner | `R7L208` | `R7L208` |
+   | Repository name | `omnigent-muse` | `omnigent-muse` |
+   | Workflow name | `release.yml` | `release.yml` |
+   | Environment name | `pypi` | `testpypi` |
+
+   The first successful publish turns each pending publisher into the
+   project's trusted publisher.
+3. **Create the environments.** In the repository's
+   **Settings → Environments**, create `pypi` and `testpypi`. For each one:
+   - add yourself under **Required reviewers**;
+   - under **Deployment branches and tags**, choose **Selected branches and
+     tags** and add the tag rule `v*`;
+   - add no secrets. Trusted Publishing needs none.
+
+## Rehearse on TestPyPI
+
+Before the first release, and whenever the release workflow changes, publish
+a release candidate to TestPyPI:
+
+1. Open a PR that sets `version = "X.Y.ZrcN"` in `pyproject.toml`, and merge
+   it.
+2. Create a GitHub Release with tag `vX.Y.ZrcN` targeting `main`, and check
+   **Set as a pre-release**.
+3. Approve the `testpypi` deployment when the workflow asks, then check that
+   every job passes.
+
+TestPyPI never accepts the same version twice, so each rehearsal needs the
+next `rcN`.
+
+## Release checklist
+
+1. **Prepare the release PR.**
+   - Set `version` in `pyproject.toml` to the new version (see
+     [Versioning](#versioning)).
+   - In `CHANGELOG.md`, rename **Unreleased** to `[X.Y.Z] - YYYY-MM-DD`, add
+     an empty **Unreleased** above it, and update the comparison links at the
+     bottom.
+   - If the minimum supported Omnigent changed, update the `omnigent` bound in
+     `pyproject.toml` and the minimum legs in `release.yml` and
+     `integration.yml` together.
+   - For a release that changes the Muse transport or provider handling, run
+     the manual end-to-end pass with the `meta` provider (#16) and record the
+     results in the PR.
+2. **Merge it** once CI is green, and wait for the `main` push CI to pass on
+   the merge commit.
+3. **Create the GitHub Release.** Choose a new tag `vX.Y.Z` targeting `main`,
+   use the version as the title, and paste the changelog section as the
+   notes. Leave **Set as a pre-release** cleared for a final version.
+   Publishing the Release starts the workflow.
+4. **Approve the deployment** to `pypi` when the workflow asks.
+5. **Check the result.** All jobs pass, the Release has the wheel and sdist
+   attached, and <https://pypi.org/project/omnigent-muse/> shows the new
+   version.
+
+## If a release fails
+
+- **Before publishing** (the tag, build, or verify jobs failed): nothing has
+  been uploaded. Delete the GitHub Release and the tag, fix the problem
+  through a PR, and release again with the same version.
+- **After publishing**: PyPI never accepts the same version twice. If the
+  published files are broken, yank that version on PyPI (with a reason), fix
+  forward in a PR, and release the next patch version. If only the attach or
+  smoke step failed and the published files are fine, upload the files from
+  the run's `dist` artifact to the Release by hand and note it in the release
+  notes.
+
+## Versioning
+
+`omnigent-muse` follows [semantic versioning](https://semver.org/) adapted
+for the 0.x series:
+
+- **Patch** (`0.1.0` → `0.1.1`): compatible fixes, documentation, and newly
+  supported Omnigent or Muse versions.
+- **Minor** (`0.1.x` → `0.2.0`): new features, and any breaking change, such
+  as removing or renaming a runtime option, changing a default, or raising
+  the minimum supported Omnigent, Muse, or Python version.
+- **Pre-releases** (`0.2.0rc1`, `0.2.0b1`): optional, for rehearsing a
+  release or for early testing. They publish to TestPyPI only.
+
+Tags are always `v` plus the exact version in `pyproject.toml`.
