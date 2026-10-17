@@ -90,8 +90,85 @@ tests; `meta` requires Muse-owned authentication through `muse login`,
 See [docs/authentication.md](docs/authentication.md) for per-provider setup,
 readiness checks, and troubleshooting authentication failures.
 
-`OSEnvSpec` is accepted and validated here, including its sandbox environment
-allowlist. Process-tree sandbox enforcement is tracked separately in issue #6.
+## Sandboxing
+
+When `os_env.sandbox` selects the `linux_bwrap` backend, `muse serve` is
+started through Omnigent's sandbox launcher, so Muse and every process it launches (including its shell tool)
+run under the spec's filesystem, network, and environment restrictions. The
+policy is resolved once when the harness starts, and every respawned
+transport reuses it.
+
+```yaml
+os_env:
+  type: caller_process
+  sandbox:
+    type: linux_bwrap
+    write_paths: ["."]             # the workspace is read-only unless granted
+```
+
+Inside the sandbox the harness:
+
+- runs the installed `muse-bin-<version>` binary directly (the `muse`
+  installer wrapper self-updates and reads files the sandbox hides) and sets
+  `MUSE_NO_AUTO_UPDATE=1`;
+- passes `--disable-sandbox`, because Muse's own shell sandbox needs user
+  namespaces that the outer sandbox denies — Omnigent's sandbox is the
+  boundary;
+- runs Muse from a private home, `$OMNIGENT_DATA_DIR/muse/<hash>`
+  (default `~/.omnigent/...`), one per workspace, and grants write access to
+  that home only. Sessions, plugins, skills, memory and settings written by a
+  sandboxed run stay there, so the unsandboxed `muse` never loads them. The
+  home persists across runs: anything a sandboxed run writes there (a hook,
+  plugin, skill, memory or `trust.json`) is loaded by every later sandboxed
+  run in that workspace, including one with a looser spec. Delete the
+  directory to start clean;
+- signs Muse in with your login: `auth.json` and `settings.json` are copied
+  in from your Muse config directory (`$XDG_CONFIG_HOME/muse`, default
+  `~/.config/muse`). Nothing written inside the sandbox reaches your own
+  login: a token refresh made there stays in the private home, and is replaced
+  when you log in again (or dropped when you log out). Keeping the copy
+  private cannot sign you out: the Meta login (a device-code access token and
+  the API key minted from it) has no refresh token to rotate, and Muse 1.4.9
+  leaves it unchanged across sandboxed turns. `trust.json` is not
+  copied, so a sandboxed run starts with no trusted workspaces.
+  `META_API_KEY` reaches Muse only when it is passed through, as unsandboxed;
+- hides your own Muse directories (`~/.config/muse`, `~/.local/share/muse`,
+  `~/.local/state/muse`, `~/.cache/muse`, or their `$XDG_*_HOME`
+  equivalents), which a broader read grant would otherwise expose. A path the
+  spec grants inside one of them stays visible.
+
+The login is readable inside the sandbox, so its shell tool can read your
+Muse token, as with Omnigent's Claude and Codex harnesses.
+
+`sandbox.type: none` (or no `os_env`) leaves Muse unsandboxed. These
+configurations fail before `muse serve` starts, never falling back to an
+unsandboxed launch:
+
+- a backend that cannot confine the Muse process tree (e.g.
+  `windows_jobobject`) or that is unavailable on this host (e.g. `bwrap`
+  missing);
+- `darwin_seatbelt`: Muse cannot run under Omnigent's Seatbelt profile yet
+  ([#23](https://github.com/R7L208/omnigent-muse/issues/23)). On macOS an
+  omitted `sandbox.type` and `type: auto` both select it, so a portable spec
+  that works with other harnesses fails here; use `type: none` on macOS:
+
+  ```yaml
+  os_env:
+    type: caller_process
+    sandbox:
+      type: none
+  ```
+- `egress_rules`, `credential_proxy` and `git_ssh`: each needs a helper the
+  parent starts (the egress proxy or the git SSH relay), which this harness
+  does not start yet ([#30](https://github.com/R7L208/omnigent-muse/issues/30));
+- a write grant that covers the system temporary directory (e.g.
+  `write_paths: ["/tmp"]`), which holds the sandbox launcher;
+- `allow_network: false` with any provider except `echo` — the `meta` and
+  `local` providers need the network;
+- a `muse` installer wrapper whose selected binary is not installed.
+
+On Ubuntu 24.04+ unprivileged bubblewrap also needs an AppArmor profile that
+grants `userns` to `/usr/bin/bwrap`.
 
 ## License
 
