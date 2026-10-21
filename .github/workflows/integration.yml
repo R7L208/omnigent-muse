@@ -1,0 +1,127 @@
+name: Integration
+
+# Credential-free end-to-end tests: a pinned `muse` CLI driven through
+# Omnigent's harness runner (tests/integration). The job declares no secrets
+# and blanks every provider credential Muse reads, so it is safe on fork PRs;
+# untrusted PRs still wait on the security gate first.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+  META_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  OPENAI_API_KEY: ""
+  OPENROUTER_API_KEY: ""
+
+jobs:
+  gate:
+    uses: ./.github/workflows/security-gate.yml
+
+  muse:
+    name: Muse via Omnigent ${{ matrix.omnigent.name }}
+    needs: gate
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        omnigent:
+          # Minimum supported release (pyproject: omnigent>=0.16.0), by commit.
+          - name: "0.16.0"
+            ref: 82a74473ee4c01163c4269f4296b10a158f0e47e
+          - name: main
+            ref: main
+
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: omnigent-muse
+          persist-credentials: false
+
+      - name: Check out Omnigent ${{ matrix.omnigent.name }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: omnigent-ai/omnigent
+          ref: ${{ matrix.omnigent.ref }}
+          path: omnigent
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.15"
+          enable-cache: true
+          cache-dependency-glob: omnigent-muse/pyproject.toml
+
+      - name: Restore Muse download
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/muse
+          key: muse-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('omnigent-muse/.github/scripts/install-muse.sh') }}
+
+      - name: Install pinned Muse CLI
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+        run: bash omnigent-muse/.github/scripts/install-muse.sh
+
+      - name: Build plugin wheel
+        working-directory: omnigent-muse
+        run: uv build --wheel --out-dir "$RUNNER_TEMP/dist"
+
+      - name: Install Omnigent and the plugin wheel
+        # Non-editable on purpose: the runner must load the plugin the way a
+        # user's install does, with no local source override. Omnigent's own
+        # dependencies resolve fresh, as for a user; the test tools match
+        # uv.lock so the unit and integration suites run the same versions.
+        run: |
+          uv venv "$RUNNER_TEMP/venv" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" \
+            ./omnigent "$RUNNER_TEMP"/dist/*.whl \
+            pytest==9.1.1 pytest-asyncio==1.4.0
+
+      - name: Verify installed plugin discovery
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -I - <<'PY'
+          import importlib.metadata
+          import omnigent.community.harness.muse.plugin as plugin
+          from omnigent.harness_plugins import plugin_state, valid_harnesses
+
+          assert "site-packages" in plugin.__file__, plugin.__file__
+          state = plugin_state()
+          assert state.load_errors == {}, state.load_errors
+          assert "muse" in valid_harnesses()
+          print("omnigent", importlib.metadata.version("omnigent"))
+          PY
+
+      - name: Run integration tests
+        working-directory: omnigent-muse
+        env:
+          OMNIGENT_MUSE_INTEGRATION: "1"
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          "$RUNNER_TEMP/venv/bin/pytest" tests/integration -v -p no:cacheprovider
