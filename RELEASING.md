@@ -12,15 +12,16 @@ runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
    `pyproject.toml`, no namespace
    `__init__.py` that would shadow core, no `[tool.uv.sources]` override);
 3. installs that wheel in a clean environment with the minimum supported
-   Omnigent (the `>=` floor in `pyproject.toml`) and the latest release from
-   PyPI. In each one it checks
+   Omnigent (the `>=` floor in `pyproject.toml`) and the latest release the
+   `pyproject.toml` range allows. In each one it checks
    plugin discovery from outside the checkout, then runs the unit suite and
    the credential-free `echo` integration tests against the installed wheel;
 4. publishes the same files through Trusted Publishing: final versions to PyPI
    (environment `pypi`), pre-releases to TestPyPI (environment `testpypi`);
-5. attaches the same files to the GitHub Release, once publishing succeeds;
-6. checks that the index serves files with the same sha256 digests, then
-   installs the release from the index and runs the `echo` tests again.
+5. checks that the index serves files with the same sha256 digests, then
+   installs the release from the index and runs the `echo` tests again;
+6. attaches the same files to the GitHub Release, once the smoke test
+   passes.
 
 No step uses a long-lived token. Only the publish job can mint an OIDC token,
 and only after the environment's reviewer approves it.
@@ -77,10 +78,11 @@ next `rcN`.
    - In `CHANGELOG.md`, rename **Unreleased** to `[X.Y.Z] - YYYY-MM-DD`, add
      an empty **Unreleased** above it, and update the comparison links at the
      bottom.
-   - If the minimum supported Omnigent changed, update the `omnigent` bound in
-     `pyproject.toml` and the minimum leg's commit in `integration.yml`
-     together. `release.yml` and the unit CI read the floor from
-     `pyproject.toml`.
+   - If the supported Omnigent range changed, update the `omnigent` bound in
+     `pyproject.toml`. If the floor moved, also update the minimum leg in
+     `integration.yml` (its name, comment and commit), the version in
+     `README.md` and `docs/integration-tests.md`. `release.yml` and the unit
+     CI read both bounds from `pyproject.toml`.
    - For a release that changes the Muse transport or provider handling, run
      the manual end-to-end pass with the `meta` provider (#16) and record the
      results in the PR.
@@ -106,7 +108,8 @@ different sha256 digests from the ones already tested or uploaded.
   the tag, fix the problem through a PR, and release again with the same
   version.
 - **Publishing failed or was rejected** (for example a Trusted Publishing
-  misconfiguration): nothing is attached to the Release. Fix the
+  misconfiguration): nothing is attached to the Release until the smoke test
+  passes. Fix the
   configuration, then re-run failed jobs. If one file was uploaded before the
   failure, the re-run skips it and uploads the rest.
 - **After publishing**: PyPI never accepts the same version twice. If the

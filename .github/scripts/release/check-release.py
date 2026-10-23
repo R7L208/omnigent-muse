@@ -15,9 +15,10 @@ public index metadata. Run from the repository root.
       same bounded ``omnigent`` requirement as pyproject.toml, and nothing
       that would break a user install (a namespace ``__init__.py`` that
       shadows core, or the local uv source override in the sdist).
-  floor
-      Prints the minimum Omnigent version pyproject.toml declares, the one
-      the release tests as its minimum.
+  spec minimum|latest
+      Prints the Omnigent requirement to test against: ``omnigent==<floor>``
+      for the minimum pyproject.toml declares, or the declared range itself
+      for the latest release it allows.
   published INDEX DIR
       INDEX ("pypi" or "testpypi") serves exactly the files in DIR, with the
       same sha256 digests: the validated artifacts are the ones published.
@@ -78,7 +79,9 @@ def _plugin_modules() -> list[str]:
 def _omnigent_specifiers(requirement: str) -> frozenset[str] | None:
     """The specifiers of an unconditional ``omnigent`` requirement, else None."""
     match = re.fullmatch(
-        r"\s*omnigent\s*\(?\s*((?:[<>=!~][^;()]*)?)\)?\s*", requirement, re.IGNORECASE
+        r"\s*omnigent\s*(?:\[[^\]]*\])?\s*\(?\s*((?:[<>=!~][^;()]*)?)\)?\s*",
+        requirement,
+        re.IGNORECASE,
     )
     if match is None:
         return None
@@ -94,18 +97,24 @@ def _declared_omnigent(project: dict) -> frozenset[str]:
     if len(found) != 1:
         raise CheckError("pyproject.toml must declare exactly one omnigent dependency")
     specs = found[0]
-    if not any(s.startswith(">=") for s in specs) or not any(
-        s.startswith("<") and not s.startswith("<=") for s in specs
-    ):
+    floors = [s for s in specs if s.startswith(">=")]
+    caps = [s for s in specs if s.startswith("<") and not s.startswith("<=")]
+    if len(floors) != 1 or len(caps) != 1:
         raise CheckError(
-            f"pyproject.toml must bound omnigent with >= and <, not {sorted(specs)}"
+            "pyproject.toml must bound omnigent with one >= and one <, "
+            f"not {sorted(specs)}"
         )
     return specs
 
 
-def omnigent_floor() -> str:
-    (floor,) = [s[2:] for s in _declared_omnigent(_project()) if s.startswith(">=")]
-    return floor
+def omnigent_spec(leg: str) -> str:
+    specs = _declared_omnigent(_project())
+    if leg == "minimum":
+        (floor,) = [s[2:] for s in specs if s.startswith(">=")]
+        return f"omnigent=={floor}"
+    if leg == "latest":
+        return f"omnigent{','.join(sorted(specs))}"
+    raise CheckError(f"leg must be 'minimum' or 'latest', not {leg!r}")
 
 
 def _read(archive: zipfile.ZipFile, name: str) -> str:
@@ -165,9 +174,12 @@ def check_dist(dist: Path) -> None:
         info = f"{DIST_NAME}-{version}.dist-info"
         metadata = Parser().parsestr(_read(zf, f"{info}/METADATA"))
         entry_points = _read(zf, f"{info}/entry_points.txt")
-    missing = [m for m in _plugin_modules() if m not in names]
-    if missing:
+    modules = set(_plugin_modules())
+    shipped = {n for n in names if n.startswith(f"{PLUGIN_DIR}/") and n.endswith(".py")}
+    if missing := sorted(modules - shipped):
         raise CheckError(f"wheel is missing plugin modules: {missing}")
+    if extra := sorted(shipped - modules):
+        raise CheckError(f"wheel ships modules that are not in src/: {extra}")
     shadowing = [m for m in CORE_NAMESPACES if m in names]
     if shadowing:
         raise CheckError(f"wheel ships core namespace packages: {shadowing}")
@@ -185,8 +197,8 @@ def check_dist(dist: Path) -> None:
         raise CheckError(f"wheel metadata is {metadata['Name']} {metadata['Version']}")
     requires = metadata.get_all("Requires-Dist") or []
     declared = _declared_omnigent(project)
-    shipped = [s for r in requires if (s := _omnigent_specifiers(r)) is not None]
-    if shipped != [declared]:
+    required = [s for r in requires if (s := _omnigent_specifiers(r)) is not None]
+    if required != [declared]:
         raise CheckError(
             f"wheel requires omnigent as {requires}, but pyproject.toml declares "
             f"{','.join(sorted(declared))}"
@@ -223,6 +235,7 @@ def check_published(
     url = f"{INDEXES[index]}/pypi/{PROJECT}/{version}/json"
     served: dict[str, str] = {}
     for attempt in range(1, attempts + 1):
+        served = {}
         try:
             with urllib.request.urlopen(url, timeout=30) as response:
                 release = json.load(response)
@@ -256,8 +269,8 @@ def main(argv: list[str]) -> int:
                 print(check_version(tag, prerelease))
             case ["dist", dist]:
                 check_dist(Path(dist))
-            case ["floor"]:
-                print(omnigent_floor())
+            case ["spec", leg]:
+                print(omnigent_spec(leg))
             case ["published", index, dist]:
                 check_published(index, Path(dist))
             case _:

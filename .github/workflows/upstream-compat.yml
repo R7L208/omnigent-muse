@@ -131,12 +131,7 @@ jobs:
         env:
           OMNIGENT: ${{ matrix.omnigent }}
         run: |
-          floor="$(python .github/scripts/release/check-release.py floor)"
-          if [[ "$OMNIGENT" == "minimum" ]]; then
-            spec="omnigent==$floor"
-          else
-            spec="omnigent>=$floor,<1"
-          fi
+          spec="$(python .github/scripts/release/check-release.py spec "$OMNIGENT")"
           uv sync --group dev
           uv pip install --python .venv/bin/python --reinstall-package omnigent "$spec"
           .venv/bin/python -c 'import importlib.metadata as m; print("omnigent", m.version("omnigent"))'

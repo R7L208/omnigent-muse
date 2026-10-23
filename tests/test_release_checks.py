@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import http.client
 import importlib.util
 import io
@@ -176,6 +175,11 @@ def test_dist_accepts_the_expected_files(tmp_path: Path) -> None:
             "wheel is missing omnigent_muse-0.1.0.dist-info/entry_points.txt",
         ),
         ({"requires": "omnigent<1,>=0.1"}, "[project]\n", "pyproject.toml declares"),
+        (
+            {"extra": {f"{PLUGIN}/inner/stale.py": ""}},
+            "[project]\n",
+            "not in src/",
+        ),
         ({"requires": "omnigent>=0.16.0"}, "[project]\n", "pyproject.toml declares"),
         (
             {"requires": "omnigent-other<1,>=0.16.0"},
@@ -223,7 +227,10 @@ def test_dist_accepts_reordered_specifiers(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("dependency", ["omnigent>=0.16.0", "omnigent<1", "omnigent"])
+@pytest.mark.parametrize(
+    "dependency",
+    ["omnigent>=0.16.0", "omnigent<1", "omnigent", "omnigent>=0.16.0,>=0.17.0,<1"],
+)
 def test_dist_rejects_an_unbounded_declaration(tmp_path: Path, dependency: str) -> None:
     dist = _dist(_project(tmp_path, "0.1.0", dependency=dependency))
     _wheel(dist, "0.1.0", requires=dependency)
@@ -235,34 +242,41 @@ def test_dist_rejects_an_unbounded_declaration(tmp_path: Path, dependency: str) 
     assert "must bound omnigent" in result.stderr
 
 
-def test_floor_prints_the_declared_minimum(tmp_path: Path) -> None:
-    result = _run(
-        _project(tmp_path, "0.1.0", dependency="omnigent<1,>=0.17.2"), "floor"
-    )
+@pytest.mark.parametrize(
+    ("leg", "spec"),
+    [("minimum", "omnigent==0.17.2"), ("latest", "omnigent<2,>=0.17.2")],
+)
+def test_spec_follows_the_declared_range(tmp_path: Path, leg: str, spec: str) -> None:
+    project = _project(tmp_path, "0.1.0", dependency="omnigent[web] >=0.17.2, <2")
+
+    result = _run(project, "spec", leg)
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "0.17.2"
+    assert result.stdout.strip() == spec
+
+
+def test_spec_rejects_an_unknown_leg(tmp_path: Path) -> None:
+    result = _run(_project(tmp_path, "0.1.0"), "spec", "oldest")
+
+    assert result.returncode == 1
+    assert "leg must be" in result.stderr
 
 
 @pytest.fixture
-def release_checks(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    """The script as a module, with sleeps skipped, for stubbing the index."""
+def release_checks() -> ModuleType:
+    """The script as a module, for stubbing the index."""
     spec = importlib.util.spec_from_file_location("check_release", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setattr(module.time, "sleep", lambda _: None)
     return module
 
 
-def _served(dist: Path) -> bytes:
+def _served(module: ModuleType, dist: Path) -> bytes:
     return json.dumps(
         {
             "urls": [
-                {
-                    "filename": p.name,
-                    "digests": {"sha256": hashlib.sha256(p.read_bytes()).hexdigest()},
-                }
+                {"filename": p.name, "digests": {"sha256": module._sha256(p)}}
                 for p in sorted(dist.iterdir())
             ]
         }
@@ -308,7 +322,7 @@ def test_published_retries_until_the_index_serves_the_files(
             http.client.IncompleteRead(b"{"),
             b'{"urls": null}',
             b"not json",
-            _served(dist),
+            _served(release_checks, dist),
         ],
     )
 
@@ -322,7 +336,7 @@ def test_published_rejects_different_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_checks: ModuleType
 ) -> None:
     dist = _published_dist(tmp_path, monkeypatch)
-    served = _served(dist)
+    served = _served(release_checks, dist)
     (dist / "omnigent_muse-0.1.0.tar.gz").write_bytes(b"rebuilt sdist")
     _index(monkeypatch, release_checks, [served, served])
 
