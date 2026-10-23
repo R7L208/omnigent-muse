@@ -2,10 +2,12 @@ name: Release
 
 # Publishes a GitHub Release to PyPI, or a GitHub pre-release to TestPyPI
 # (see RELEASING.md). The wheel and sdist are built once. Those exact files are
-# tested against the minimum and latest Omnigent, attached to the Release,
-# published through Trusted Publishing, and then checked on the index by
-# sha256 and reinstalled from it for a smoke test. Only the publish job can
-# mint an OIDC token, and it runs in a protected environment.
+# tested against the minimum and latest Omnigent, published through Trusted
+# Publishing, attached to the Release, and then checked on the index by sha256
+# and reinstalled from it for a smoke test. Only the publish job can mint an
+# OIDC token, and it runs in a protected environment. To recover from a failed
+# job, use "Re-run failed jobs": it reuses this run's built files, whereas
+# "Re-run all jobs" rebuilds them with different digests.
 
 on:
   release:
@@ -37,6 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       index: ${{ steps.version.outputs.index }}
+      floor: ${{ steps.version.outputs.floor }}
     steps:
       - name: Check out the release tag
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -60,12 +63,26 @@ jobs:
           PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           version="$(python .github/scripts/release/check-release.py version "$TAG" "$PRERELEASE")"
+          floor="$(python .github/scripts/release/check-release.py floor)"
           if [[ "$PRERELEASE" == "true" ]]; then index=testpypi; else index=pypi; fi
-          echo "Releasing omnigent-muse $version to $index"
+          echo "Releasing omnigent-muse $version to $index (Omnigent >= $floor)"
           {
             echo "version=$version"
             echo "index=$index"
+            echo "floor=$floor"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Check the tagged commit is on main
+        # Only reviewed, merged code is released. "behind" or "identical"
+        # means the commit is an ancestor of main.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)"
+          if [[ "$status" != "behind" && "$status" != "identical" ]]; then
+            echo "::error::$GITHUB_SHA is not on main (compare status: $status); tag a commit from main"
+            exit 1
+          fi
 
       - name: Build distributions
         run: uv build --out-dir dist
@@ -92,10 +109,10 @@ jobs:
       fail-fast: true
       matrix:
         omnigent:
-          - name: "0.16.0 (minimum)"
-            spec: omnigent==0.16.0
+          - name: minimum
+            spec: omnigent==${{ needs.build.outputs.floor }}
           - name: latest
-            spec: omnigent>=0.16.0,<1
+            spec: omnigent>=${{ needs.build.outputs.floor }},<1
     steps:
       - name: Check out the release tag
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -164,7 +181,9 @@ jobs:
 
   attach:
     name: Attach distributions to the Release
-    needs: [build, verify]
+    # After publish, so a rejected or failed publish leaves no assets for a
+    # version the index does not have.
+    needs: [build, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -180,7 +199,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY"
+        # --clobber lets a re-run replace a partial upload with the same files.
+        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
 
   publish:
     name: Publish to ${{ needs.build.outputs.index }}
@@ -203,6 +223,9 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
+          # A re-run after a partial upload skips the file already accepted;
+          # the smoke job then checks every served file's sha256.
+          skip-existing: true
           repository-url: ${{ needs.build.outputs.index == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
 
   smoke:

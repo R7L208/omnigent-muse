@@ -3,19 +3,22 @@
 A release is a version-bump PR, then a GitHub Release. Publishing the Release
 runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
 
-1. checks that the tag is exactly `v<project.version>`, and that the GitHub
-   pre-release flag matches the version;
+1. checks that the tag is exactly `v<project.version>`, that the GitHub
+   pre-release flag matches the version, and that the tagged commit is on
+   `main`;
 2. builds the wheel and sdist once, and checks them with `twine check` and
    [`check-release.py`](.github/scripts/release/check-release.py) (plugin
-   modules, entry point, Omnigent dependency bounds, no namespace
+   modules, entry point, the same bounded Omnigent dependency as
+   `pyproject.toml`, no namespace
    `__init__.py` that would shadow core, no `[tool.uv.sources]` override);
 3. installs that wheel in a clean environment with the minimum supported
-   Omnigent (0.16.0) and the latest release from PyPI. In each one it checks
+   Omnigent (the `>=` floor in `pyproject.toml`) and the latest release from
+   PyPI. In each one it checks
    plugin discovery from outside the checkout, then runs the unit suite and
    the credential-free `echo` integration tests against the installed wheel;
-4. attaches the same files to the GitHub Release;
-5. publishes the same files through Trusted Publishing: final versions to PyPI
+4. publishes the same files through Trusted Publishing: final versions to PyPI
    (environment `pypi`), pre-releases to TestPyPI (environment `testpypi`);
+5. attaches the same files to the GitHub Release, once publishing succeeds;
 6. checks that the index serves files with the same sha256 digests, then
    installs the release from the index and runs the `echo` tests again.
 
@@ -75,8 +78,9 @@ next `rcN`.
      an empty **Unreleased** above it, and update the comparison links at the
      bottom.
    - If the minimum supported Omnigent changed, update the `omnigent` bound in
-     `pyproject.toml` and the minimum legs in `release.yml` and
-     `integration.yml` together.
+     `pyproject.toml` and the minimum leg's commit in `integration.yml`
+     together. `release.yml` and the unit CI read the floor from
+     `pyproject.toml`.
    - For a release that changes the Muse transport or provider handling, run
      the manual end-to-end pass with the `meta` provider (#16) and record the
      results in the PR.
@@ -93,15 +97,22 @@ next `rcN`.
 
 ## If a release fails
 
+Retry with **Re-run failed jobs**, never **Re-run all jobs**. A re-run of
+failed jobs reuses the run's `dist` artifact; rebuilding produces files with
+different sha256 digests from the ones already tested or uploaded.
+
 - **Before publishing** (the tag, build, or verify jobs failed): nothing has
-  been uploaded. Delete the GitHub Release and the tag, fix the problem
-  through a PR, and release again with the same version.
+  been uploaded to the index or the Release. Delete the GitHub Release and
+  the tag, fix the problem through a PR, and release again with the same
+  version.
+- **Publishing failed or was rejected** (for example a Trusted Publishing
+  misconfiguration): nothing is attached to the Release. Fix the
+  configuration, then re-run failed jobs. If one file was uploaded before the
+  failure, the re-run skips it and uploads the rest.
 - **After publishing**: PyPI never accepts the same version twice. If the
   published files are broken, yank that version on PyPI (with a reason), fix
   forward in a PR, and release the next patch version. If only the attach or
-  smoke step failed and the published files are fine, upload the files from
-  the run's `dist` artifact to the Release by hand and note it in the release
-  notes.
+  smoke job failed and the published files are fine, re-run failed jobs.
 
 ## Versioning
 

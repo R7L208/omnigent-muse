@@ -94,3 +94,54 @@ jobs:
           assert state.load_errors == {}, state.load_errors
           assert "muse" in valid_harnesses()
           PY
+
+  released:
+    # The unit suite against the released Omnigent versions the package
+    # supports: the floor pyproject.toml declares, and the latest release.
+    # The pytest job above covers Omnigent main.
+    name: Pytest (Omnigent ${{ matrix.omnigent }})
+    needs: gate
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        omnigent: [minimum, latest]
+
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.15"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install plugin with released Omnigent
+        env:
+          OMNIGENT: ${{ matrix.omnigent }}
+        run: |
+          floor="$(python .github/scripts/release/check-release.py floor)"
+          if [[ "$OMNIGENT" == "minimum" ]]; then
+            spec="omnigent==$floor"
+          else
+            spec="omnigent>=$floor,<1"
+          fi
+          uv sync --group dev
+          uv pip install --python .venv/bin/python --reinstall-package omnigent "$spec"
+          .venv/bin/python -c 'import importlib.metadata as m; print("omnigent", m.version("omnigent"))'
+
+      - name: Run tests
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: uv run --no-sync pytest -q
