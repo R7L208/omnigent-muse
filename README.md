@@ -20,16 +20,29 @@ not replay or seed a snapshot for consumers attaching after a turn has begun.
 > streaming output, reasoning, approvals, usage, cancellation, and failures into
 > Omnigent events through the vendored MSP transport.
 
-## Install (local dev)
+## Install
+
+Install the package into the same environment as Omnigent 0.16.0 or later:
 
 ```sh
-# from this directory, with a sibling ../omnigent checkout
-uv pip install .
+pip install omnigent-muse    # or: uv pip install omnigent-muse
 ```
 
-Use a regular (non-editable) install: editable installs resolve through PEP 660
-finder hooks rather than plain `sys.path` entries, which core's namespace
-extending can't see — the plugin's modules won't import.
+To install from a checkout instead, run `uv pip install .` from this
+directory. Use a regular (non-editable) install: editable installs resolve
+through PEP 660 finder hooks rather than plain `sys.path` entries, which
+core's namespace extending can't see, so the plugin's modules won't import.
+
+## Development
+
+```sh
+just ensure        # .venv with the released Omnigent from PyPI and the dev tools
+just check         # lint, type check, and the unit suite
+just core-sibling  # optional: swap in a sibling ../omnigent checkout, as CI does with main
+```
+
+Releases follow [RELEASING.md](RELEASING.md); user-visible changes go in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Verify discovery
 
