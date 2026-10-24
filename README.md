@@ -90,6 +90,27 @@ tests; `meta` requires Muse-owned authentication through `muse login`,
 See [docs/authentication.md](docs/authentication.md) for per-provider setup,
 readiness checks, and troubleshooting authentication failures.
 
+## Omnigent tools
+
+The Omnigent tools an agent is given (session, agent, policy, skill and web
+tools) are exposed to Muse as an MCP server named `omnigent_<random>`, so
+Muse sees them as `mcp__omnigent_<random>__<tool>` next to its built-in tools.
+Each Muse session gets its own relay, with a fresh name, started with the
+session and stopped when the session ends or the transport is respawned. The
+random suffix keeps a workspace `.mcp.json` server from posing as the relay.
+
+Calls go through Omnigent's policy (allow, ask, deny) when they are
+dispatched, and approval cards appear in Omnigent as for other harnesses.
+Muse's own approval prompt for these tools is answered automatically with a
+one-time grant, so a call is never approved twice and no "always allow" rule
+is written to your Muse settings. While an Omnigent tool call is still
+running, including one waiting on an approval card, the turn idle timeout
+(`turn_idle_timeout`) does not fire.
+
+The relay is best effort: if it cannot start, the session runs with Muse's
+built-in tools only and a warning is logged. Sandboxed sessions do not get
+Omnigent tools yet (see below).
+
 ## Sandboxing
 
 When `os_env.sandbox` selects the `linux_bwrap` backend, `muse serve` is
@@ -132,6 +153,9 @@ Inside the sandbox the harness:
   leaves it unchanged across sandboxed turns. `trust.json` is not
   copied, so a sandboxed run starts with no trusted workspaces.
   `META_API_KEY` reaches Muse only when it is passed through, as unsandboxed;
+- does not expose Omnigent tools: the relay's bridge directory is not
+  reachable from inside the sandbox yet, so the session runs with Muse's
+  built-in tools only;
 - hides your own Muse directories (`~/.config/muse`, `~/.local/share/muse`,
   `~/.local/state/muse`, `~/.cache/muse`, or their `$XDG_*_HOME`
   equivalents), which a broader read grant would otherwise expose. A path the

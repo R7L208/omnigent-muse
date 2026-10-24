@@ -851,10 +851,137 @@ async def test_turn_times_out_after_activity_stops() -> None:
         ]
 
 
+async def test_idle_timeout_waits_while_a_relayed_call_is_in_flight() -> None:
+    # Muse emits nothing while a relayed Omnigent call waits on an approval
+    # card, which can take longer than the idle timeout.
+    stream = _DelayedStream([(0.05, MspTurnCompleted("s", "turn-1"))])
+    transport = MspTransport(cast(Any, _DelayedClient(stream)), idle_timeout=0.01)
+
+    events = [
+        event
+        async for event in transport.run_turn(
+            "s", text="hello", reasoning_effort=None, busy=lambda: True
+        )
+    ]
+
+    assert isinstance(events[-1], MuseTurnFinished)
+
+
+async def test_idle_timeout_applies_again_once_relayed_calls_finish() -> None:
+    stream = _DelayedStream([], stall=True)
+    transport = MspTransport(cast(Any, _DelayedClient(stream)), idle_timeout=0.01)
+    in_flight = [True]
+    asyncio.get_running_loop().call_later(0.03, in_flight.clear)
+
+    with pytest.raises(MuseTransportError, match="no events for 0.01s"):
+        _ = [
+            event
+            async for event in transport.run_turn(
+                "s", text="hello", reasoning_effort=None, busy=lambda: bool(in_flight)
+            )
+        ]
+    assert not in_flight
+
+
 @pytest.mark.parametrize("idle_timeout", [0, -1])
 def test_idle_timeout_must_be_positive(idle_timeout: float) -> None:
     with pytest.raises(ValueError, match="greater than zero"):
         MspTransport(idle_timeout=idle_timeout)
+
+
+async def test_start_session_forwards_mcp_servers(tmp_path: Path) -> None:
+    transport = await _transport(tmp_path)
+    servers = {
+        "omnigent": {
+            "transport": "stdio",
+            "command": "python",
+            "args": ["-I", "-m", "serve-mcp"],
+            "env": {"PYTHONUNBUFFERED": "1"},
+            "mode": "optional",
+        }
+    }
+    try:
+        await transport.start_session(
+            workspace_root=None,
+            model=None,
+            approval_mode="onRequest",
+            mcp_servers=servers,
+        )
+        [start] = _frames(tmp_path, "session/start")
+        assert start["params"]["config"] == {"mcpServers": servers}
+    finally:
+        await transport.close()
+
+
+async def test_start_session_without_mcp_servers_sends_no_config(
+    tmp_path: Path,
+) -> None:
+    transport = await _transport(tmp_path)
+    try:
+        await transport.start_session(
+            workspace_root=None, model=None, approval_mode="onRequest"
+        )
+        [start] = _frames(tmp_path, "session/start")
+        assert "config" not in start["params"]
+    finally:
+        await transport.close()
+
+
+async def test_adapter_normalizes_live_muse_approval_payload() -> None:
+    # Shape captured from muse 1.4.4: decisions are host verbs, not allow/deny,
+    # and the tool arguments arrive as a JSON string in ``rawArgs``.
+    transport = MspTransport(cast(Any, _ScriptedClient()))
+    event = transport._approval(
+        MspApprovalRequested(
+            session_id="s",
+            approval_id="approval-1",
+            raw={
+                "approvalId": "approval-1",
+                "availableChoices": [
+                    {
+                        "choiceId": "allow_once",
+                        "decision": "approved",
+                        "label": "Allow once",
+                        "scope": "once",
+                    },
+                    {
+                        "choiceId": "allow_session",
+                        "decision": "approvedForSession",
+                        "label": "Allow for this session",
+                        "scope": "session",
+                    },
+                    {
+                        "choiceId": "allow_local_mcp_tool",
+                        "decision": "approvedPolicyAmendment",
+                        "label": "Always allow this MCP tool",
+                        "scope": "localPersistent",
+                    },
+                    {
+                        "choiceId": "abort",
+                        "decision": "abort",
+                        "label": "Reject",
+                        "scope": "once",
+                        "acceptsFeedback": True,
+                    },
+                ],
+                "currentRequirementId": {"approvalId": "approval-1", "sourceIndex": 0},
+                "rawArgs": '{"text":"hello"}',
+                "subject": {"kind": "tool", "toolName": "mcp__omnigent__probe_echo"},
+                "toolName": "mcp__omnigent__probe_echo",
+            },
+        )
+    )
+
+    assert event.tool_name == "mcp__omnigent__probe_echo"
+    assert event.arguments == {"text": "hello"}
+    # Only the one-shot approval counts as "allow", so a policy ALLOW can never
+    # pick a session-wide or persisted grant.
+    assert [(c.choice_id, c.decision) for c in event.choices] == [
+        ("allow_once", "allow"),
+        ("allow_session", "approvedforsession"),
+        ("allow_local_mcp_tool", "approvedpolicyamendment"),
+        ("abort", "deny"),
+    ]
 
 
 async def test_approval_requirement_is_preserved_after_failed_decision() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,12 +53,14 @@ class FakeTransport:
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]:
         self.turns.append(
             {
                 "session_id": session_id,
                 "text": text,
                 "reasoning_effort": reasoning_effort,
+                "busy": busy,
             }
         )
         for event in self.events:
@@ -77,6 +79,49 @@ class FakeTransport:
 
     async def close(self) -> None:
         self.closed = True
+
+
+RELAYED_TOOLS = [
+    {
+        "name": "web_fetch",
+        "description": "Fetch a URL.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+]
+RELAY_SERVERS = {
+    "omnigent": {
+        "transport": "stdio",
+        "command": "python",
+        "args": [],
+        "env": {},
+        "mode": "optional",
+    }
+}
+
+
+class FakeRelay:
+    def __init__(self) -> None:
+        self.started: list[tuple[list[dict[str, Any]], object]] = []
+        self.closed = 0
+
+    def start(
+        self, tools: Sequence[dict[str, Any]], tool_executor: object, loop: object
+    ) -> dict[str, Any] | None:
+        self.started.append((list(tools), tool_executor))
+        return RELAY_SERVERS if tools and tool_executor is not None else None
+
+    def is_relayed(self, tool_name: str) -> bool:
+        return bool(self.started) and tool_name == "mcp__omnigent__web_fetch"
+
+    def busy(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+async def _bridge(name: str, args: dict[str, Any], **kwargs: Any) -> object:
+    return {"output": "ok"}
 
 
 async def collect(executor: MuseExecutor, **kwargs: Any) -> list[object]:
@@ -178,6 +223,7 @@ async def test_starts_once_injects_system_prompt_once_and_uses_latest_user_messa
             "workspace_root": "/workspace",
             "model": "model-a",
             "approval_mode": "onRequest",
+            "mcp_servers": None,
         }
     ]
     assert transport.turns[0]["text"] == "Follow the project instructions.\n\nhello"
@@ -420,6 +466,7 @@ async def test_interrupt_delegates_for_live_turn() -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             yield MuseTurnStarted("turn-live")
             started.set()
@@ -447,6 +494,7 @@ async def test_dead_transport_during_interrupt_clears_stale_session() -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             yield MuseTurnStarted("turn-live")
             started.set()
@@ -486,6 +534,7 @@ class FailFirstTurnTransport(FakeTransport):
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]:
         self.turns.append(
             {
@@ -554,7 +603,12 @@ async def test_dead_transport_is_replaced_on_next_turn() -> None:
     )
     assert isinstance(complete, TurnComplete)
     assert replacement.starts == [
-        {"workspace_root": None, "model": None, "approval_mode": "onRequest"}
+        {
+            "workspace_root": None,
+            "model": None,
+            "approval_mode": "onRequest",
+            "mcp_servers": None,
+        }
     ]
     replay = replacement.turns[0]["text"]
     assert replay.startswith("Follow the project instructions.\n\n")
@@ -971,6 +1025,7 @@ async def test_dead_transport_during_turn_clears_session() -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             self.turns.append(
                 {
@@ -1113,6 +1168,233 @@ async def test_auth_error_with_missing_active_provider_metadata() -> None:
     )
 
 
+async def test_session_start_attaches_relay_servers() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert relay.started == [(RELAYED_TOOLS, _bridge)]
+    assert transport.starts[0]["mcp_servers"] == RELAY_SERVERS
+
+
+async def test_empty_tool_list_starts_session_without_relay_servers() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=[])
+
+    assert transport.starts[0]["mcp_servers"] is None
+
+
+async def test_tools_without_bridge_start_session_without_relay_servers() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+
+    events = await collect(executor, tools=RELAYED_TOOLS)
+
+    assert isinstance(events[-1], TurnComplete)
+    assert transport.starts[0]["mcp_servers"] is None
+
+
+async def test_respawn_closes_old_relay_and_attaches_a_new_one() -> None:
+    dead = FakeTransport(
+        [MuseTransportError("host exited", retryable=True, transport_dead=True)]
+    )
+    replacement = FakeTransport([MuseTurnFinished("turn-2", "completed")])
+    transports = iter((dead, replacement))
+    first, second = FakeRelay(), FakeRelay()
+    relays = iter((first, second))
+    executor = MuseExecutor(
+        lambda: next(transports), relay_factory=lambda: next(relays)
+    )
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=RELAYED_TOOLS)
+    assert first.closed == 1
+
+    await collect(executor, tools=RELAYED_TOOLS)
+    assert second.started == [(RELAYED_TOOLS, _bridge)]
+    assert replacement.starts[0]["mcp_servers"] == RELAY_SERVERS
+    assert second.closed == 0
+
+
+async def test_close_closes_relay_once() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    await executor.close()
+    await executor.close()
+
+    assert relay.closed == 1
+    assert transport.closed
+
+
+async def test_failed_session_start_closes_relay() -> None:
+    class RefusingTransport(FakeTransport):
+        async def start_session(self, **kwargs: Any) -> str:
+            raise MuseTransportError("session/start refused")
+
+    transport = RefusingTransport()
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    events = await collect(executor, tools=RELAYED_TOOLS)
+
+    assert events == [ExecutorError("Muse startup failed: session/start refused")]
+    assert relay.closed == 1
+    assert transport.closed
+
+
+LIVE_MCP_CHOICES = (
+    MuseApprovalChoice("allow_once", "Allow once", "allow"),
+    MuseApprovalChoice("allow_session", "Allow for this session", "approvedforsession"),
+    MuseApprovalChoice(
+        "allow_local_mcp_tool", "Always allow this MCP tool", "approvedpolicyamendment"
+    ),
+    MuseApprovalChoice("abort", "Reject", "deny"),
+)
+
+
+def _relay_executor(
+    events: list[MuseEvent | BaseException],
+) -> tuple[MuseExecutor, FakeTransport]:
+    transport = FakeTransport(events)
+    executor = MuseExecutor(lambda: transport, relay_factory=FakeRelay)
+    executor._tool_executor = _bridge
+    return executor, transport
+
+
+async def test_relayed_approval_takes_one_shot_grant_without_prompting() -> None:
+    executor, transport = _relay_executor(
+        [
+            MuseApprovalRequested(
+                "approval-1",
+                "mcp__omnigent__web_fetch",
+                {"url": "https://example.com"},
+                choices=LIVE_MCP_CHOICES,
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+
+    async def no_policy(*args: Any) -> Verdict:
+        raise AssertionError("Omnigent policy runs at dispatch, not here")
+
+    async def no_prompt(*args: Any) -> str:
+        raise AssertionError("relayed calls must not prompt twice")
+
+    executor._policy_evaluator = no_policy
+    executor._elicitation_choice_handler = no_prompt
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert transport.decisions == [("session-1", "approval-1", "allow_once")]
+
+
+async def test_unadvertised_omnigent_named_tool_uses_policy() -> None:
+    executor, transport = _relay_executor(
+        [
+            MuseApprovalRequested(
+                "approval-1",
+                "mcp__omnigent__delete_everything",
+                {},
+                choices=LIVE_MCP_CHOICES,
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+
+    async def deny(*args: Any) -> Verdict:
+        return Verdict("POLICY_ACTION_DENY")
+
+    executor._policy_evaluator = deny
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert transport.decisions == [("session-1", "approval-1", "abort")]
+
+
+async def test_relayed_approval_without_one_shot_grant_falls_back_to_policy() -> None:
+    executor, transport = _relay_executor(
+        [
+            MuseApprovalRequested(
+                "approval-1",
+                "mcp__omnigent__web_fetch",
+                {},
+                choices=(
+                    MuseApprovalChoice(
+                        "allow_session", "Allow for this session", "approvedforsession"
+                    ),
+                    MuseApprovalChoice("abort", "Reject", "deny"),
+                ),
+            ),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+    calls: list[str] = []
+
+    async def deny(phase: str, data: dict[str, Any]) -> Verdict:
+        calls.append(data["name"])
+        return Verdict("POLICY_ACTION_DENY")
+
+    executor._policy_evaluator = deny
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert calls == ["mcp__omnigent__web_fetch"]
+    assert transport.decisions == [("session-1", "approval-1", "abort")]
+
+
+async def test_relayed_tool_events_are_left_to_dispatch() -> None:
+    executor, _ = _relay_executor(
+        [
+            MuseToolCall("call-r", "mcp__omnigent__web_fetch", {"url": "u"}, "started"),
+            MuseToolCall(
+                "call-r", "mcp__omnigent__web_fetch", {}, "completed", output="ok"
+            ),
+            MuseToolCall("call-b", "shell", {"command": "pwd"}, "started"),
+            MuseToolCall("call-b", "shell", {}, "completed", output="/tmp"),
+            MuseTurnFinished("turn-1", "completed"),
+        ]
+    )
+
+    events = await collect(executor, tools=RELAYED_TOOLS)
+
+    tool_events = [
+        event
+        for event in events
+        if isinstance(event, ToolCallRequest | ToolCallComplete)
+    ]
+    assert [type(event) for event in tool_events] == [ToolCallRequest, ToolCallComplete]
+    assert all(event.name == "shell" for event in tool_events)
+
+
+async def test_turn_lets_relay_activity_hold_off_the_idle_timeout() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+    relay = FakeRelay()
+    executor = MuseExecutor(lambda: transport, relay_factory=lambda: relay)
+    executor._tool_executor = _bridge
+
+    await collect(executor, tools=RELAYED_TOOLS)
+
+    assert transport.turns[0]["busy"] == relay.busy
+
+
+async def test_turn_without_relay_keeps_the_plain_idle_timeout() -> None:
+    transport = FakeTransport([MuseTurnFinished("turn-1", "completed")])
+
+    await collect(MuseExecutor(lambda: transport))
+
+    assert transport.turns[0]["busy"] is None
+
+
 _FAKE_PROVIDER_KEY = "sk-proj-FakeKey0123456789"
 _FAKE_META_KEY = "meta-test-credential-value"
 
@@ -1182,6 +1464,7 @@ async def test_transport_and_startup_errors_are_redacted() -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             raise MuseTransportError(f"host said {_FAKE_PROVIDER_KEY}")
             yield  # pragma: no cover - makes this an async generator
@@ -1237,6 +1520,7 @@ async def test_turn_failure_log_line_is_redacted(monkeypatch, caplog) -> None:
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             raise RuntimeError(f"boom {_FAKE_META_KEY} sk_fake_51HxAbC123def")
             yield  # pragma: no cover - makes this an async generator
@@ -1266,6 +1550,7 @@ async def test_interrupt_failure_log_line_is_redacted(monkeypatch, caplog) -> No
             *,
             text: str,
             reasoning_effort: str | None,
+            busy: Callable[[], bool] | None = None,
         ) -> AsyncIterator[MuseEvent]:
             yield MuseTurnStarted("turn-live")
             started.set()

@@ -7,6 +7,7 @@ can be tested without a Muse binary or a particular client implementation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -160,6 +161,7 @@ class MuseTransport(Protocol):
         workspace_root: str | None,
         model: str | None,
         approval_mode: str,
+        mcp_servers: dict[str, JsonObject] | None = None,
     ) -> str: ...
 
     def run_turn(
@@ -168,6 +170,7 @@ class MuseTransport(Protocol):
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]: ...
 
     async def decide_approval(
@@ -177,6 +180,26 @@ class MuseTransport(Protocol):
     async def interrupt_turn(self, session_id: str, turn_id: str | None) -> bool: ...
 
     async def close(self) -> None: ...
+
+
+type _ToolExecutor = Callable[..., Awaitable[object]]
+
+
+class ToolRelay(Protocol):
+    """Session-scoped relay that exposes Omnigent tools to Muse over MCP."""
+
+    def start(
+        self,
+        tools: Sequence[ToolSpec],
+        tool_executor: _ToolExecutor | None,
+        loop: asyncio.AbstractEventLoop,
+    ) -> dict[str, JsonObject] | None: ...
+
+    def is_relayed(self, tool_name: str) -> bool: ...
+
+    def busy(self) -> bool: ...
+
+    def close(self) -> None: ...
 
 
 class _PolicyVerdict(Protocol):
@@ -200,8 +223,13 @@ class MuseExecutor(Executor):
         approval_mode: str = "onRequest",
         reasoning_effort: str | None = None,
         provider: str | None = None,
+        relay_factory: Callable[[], ToolRelay] | None = None,
     ) -> None:
         self._transport_factory = transport_factory
+        self._relay_factory = relay_factory
+        self._relay: ToolRelay | None = None
+        # Installed by ExecutorAdapter; relayed tool calls dispatch through it.
+        self._tool_executor: _ToolExecutor | None = None
         self._cwd = cwd
         self._model = model
         self._approval_mode = approval_mode
@@ -228,17 +256,28 @@ class MuseExecutor(Executor):
     def handles_tools_internally(self) -> bool:
         return True
 
-    async def _ensure_session(self, model: str | None) -> str:
+    async def _ensure_session(
+        self, model: str | None, tools: Sequence[ToolSpec]
+    ) -> str:
         if self._session_id is not None:
             return self._session_id
         if self._closed:
             raise MuseTransportError("executor is closed")
         transport = self._transport_factory()
+        # Started before session/start so the relay is listening when Muse
+        # launches serve-mcp; a respawn re-enters here and gets a fresh relay.
+        relay = self._relay_factory() if self._relay_factory is not None else None
+        mcp_servers = (
+            relay.start(tools, self._tool_executor, asyncio.get_running_loop())
+            if relay is not None
+            else None
+        )
         try:
             session_id = await transport.start_session(
                 workspace_root=self._cwd,
                 model=model,
                 approval_mode=self._approval_mode,
+                mcp_servers=mcp_servers,
             )
         except BaseException:
             # The factory already spawned a host; close it so a failed startup
@@ -251,8 +290,11 @@ class MuseExecutor(Executor):
                     "Muse transport close after failed start_session failed",
                     exc_info=True,
                 )
+            if relay is not None:
+                relay.close()
             raise
         self._transport = transport
+        self._relay = relay
         self._session_id = session_id
         self._active_provider = transport.active_provider
         self._model = model
@@ -260,6 +302,7 @@ class MuseExecutor(Executor):
 
     async def _discard_transport(self) -> None:
         transport, self._transport = self._transport, None
+        relay, self._relay = self._relay, None
         self._session_id = None
         self._active_provider = None
         self._active_turn_id = None
@@ -270,6 +313,8 @@ class MuseExecutor(Executor):
                 await transport.close()
             except Exception:
                 logger.debug("Muse dead transport cleanup failed", exc_info=True)
+        if relay is not None:
+            relay.close()
 
     @staticmethod
     def _latest_user_text(messages: list[Message]) -> str:
@@ -440,6 +485,16 @@ class MuseExecutor(Executor):
         transport = self._transport
         if transport is None:
             raise MuseTransportError("approval arrived before transport startup")
+        if self._relay is not None and self._relay.is_relayed(event.tool_name):
+            # Omnigent policy runs when the relay dispatches the call, so a
+            # second prompt here would ask twice. Only the one-shot grant is
+            # taken; session-wide and persisted grants are never chosen.
+            one_shot = self._choice(event.choices, "allow")
+            if one_shot is not None:
+                await transport.decide_approval(
+                    session_id, event.approval_id, one_shot.choice_id
+                )
+                return
         arguments = self._arguments(event.arguments)
         action: str | None = None
         if self._policy_evaluator is not None:
@@ -491,6 +546,9 @@ class MuseExecutor(Executor):
         )
 
     def _translate_tool(self, event: MuseToolCall) -> ExecutorEvent | None:
+        if self._relay is not None and self._relay.is_relayed(event.name):
+            # dispatch_tool already records relayed calls and their output.
+            return None
         arguments = self._arguments(event.arguments)
         if event.state in {"started", "inProgress"}:
             already_seen = event.call_id in self._tool_calls
@@ -577,7 +635,7 @@ class MuseExecutor(Executor):
             return
         effective_model = requested_model or self._model
         try:
-            session_id = await self._ensure_session(effective_model)
+            session_id = await self._ensure_session(effective_model, tools)
         except Exception as exc:  # noqa: BLE001 - startup failures become terminal events
             yield ExecutorError(
                 f"Muse startup failed: {_redact(describe_exception(exc))}"
@@ -595,7 +653,11 @@ class MuseExecutor(Executor):
         try:
             assert self._transport is not None
             async for event in self._transport.run_turn(
-                session_id, text=text, reasoning_effort=effort
+                session_id,
+                text=text,
+                reasoning_effort=effort,
+                # A relayed call waiting on an Omnigent approval card is not idle.
+                busy=self._relay.busy if self._relay is not None else None,
             ):
                 # Receiving any event proves the host accepted our input (which
                 # carried the system prompt on the first turn); only now is it
@@ -693,6 +755,11 @@ class MuseExecutor(Executor):
             return
         self._closed = True
         transport, self._transport = self._transport, None
+        relay, self._relay = self._relay, None
         self._session_id = None
-        if transport is not None:
-            await transport.close()
+        try:
+            if transport is not None:
+                await transport.close()
+        finally:
+            if relay is not None:
+                relay.close()
