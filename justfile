@@ -11,18 +11,51 @@ registry-config := env(
 
 # Create/update this package's development environment.
 [group('setup')]
-ensure:
+ensure: _uv-version
+    #!/usr/bin/env bash
+    set -euo pipefail
+    index_url="$({{just_executable()}} --justfile {{justfile()}} _index-url)"
+    OMNIGENT_SKIP_WEB_UI=true UV_INDEX_URL="$index_url" uv sync --group dev
+
+# Test against the sibling Omnigent checkout instead of the released Omnigent,
+# as CI's unit job does with Omnigent main. Non-editable, so Pyrefly can see
+# it: rerun after pulling ../omnigent, and after `just ensure`, which goes back
+# to the newest released Omnigent the declared range allows.
+[group('setup')]
+core-sibling: _uv-version
+    #!/usr/bin/env bash
+    set -euo pipefail
+    index_url="$({{just_executable()}} --justfile {{justfile()}} _index-url)"
+    OMNIGENT_SKIP_WEB_UI=true UV_INDEX_URL="$index_url" \
+        uv pip install --python .venv/bin/python \
+        --reinstall-package omnigent --no-editable {{core-dir}}
+
+# Print the package index: UV_INDEX_URL, else the default uv index in
+# OMNIGENT_PYPI_CONFIG. Reads the config with a uv-managed Python, so it works
+# before .venv exists.
+_index-url:
     #!/usr/bin/env bash
     set -euo pipefail
     index_url="${UV_INDEX_URL:-}"
     if [[ -z "$index_url" && -f "{{registry-config}}" ]]; then
-        index_url="$(.venv/bin/python -c 'import sys, tomllib; data = tomllib.load(open(sys.argv[1], "rb")); print(next(index["url"] for index in data["tool"]["uv"]["index"] if index.get("default")))' "{{registry-config}}")"
+        index_url="$(uv run --no-project --python '>=3.11' python -c 'import sys, tomllib; data = tomllib.load(open(sys.argv[1], "rb")); print(next(index["url"] for index in data["tool"]["uv"]["index"] if index.get("default")))' "{{registry-config}}")"
     fi
     if [[ -z "$index_url" ]]; then
-        echo "No package index configured. Set UV_INDEX_URL in .env or OMNIGENT_PYPI_CONFIG to a pyproject with a default uv index." >&2
+        echo "No package index configured. Set UV_INDEX_URL in .env (https://pypi.org/simple for public PyPI) or OMNIGENT_PYPI_CONFIG to a pyproject with a default uv index." >&2
         exit 2
     fi
-    OMNIGENT_SKIP_WEB_UI=true UV_INDEX_URL="$index_url" uv sync --group dev
+    echo "$index_url"
+
+# Fail early on a uv too old for `uv pip install --no-editable`.
+_uv-version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(uv --version | awk '{print $2}')"
+    IFS=. read -r major minor _ <<< "$version"
+    if (( major == 0 && minor < 12 )); then
+        echo "uv $version is too old; this repository needs uv 0.12 or later (uv self update)." >&2
+        exit 2
+    fi
 
 # Run the offline unit suite.
 [group('check')]
@@ -57,14 +90,7 @@ format:
 core-ensure:
     #!/usr/bin/env bash
     set -euo pipefail
-    index_url="${UV_INDEX_URL:-}"
-    if [[ -z "$index_url" && -f "{{registry-config}}" ]]; then
-        index_url="$(.venv/bin/python -c 'import sys, tomllib; data = tomllib.load(open(sys.argv[1], "rb")); print(next(index["url"] for index in data["tool"]["uv"]["index"] if index.get("default")))' "{{registry-config}}")"
-    fi
-    if [[ -z "$index_url" ]]; then
-        echo "No package index configured. Set UV_INDEX_URL in .env or OMNIGENT_PYPI_CONFIG to a pyproject with a default uv index." >&2
-        exit 2
-    fi
+    index_url="$({{just_executable()}} --justfile {{justfile()}} _index-url)"
     cd {{core-dir}}
     UV_INDEX_URL="$index_url" uv sync --extra all --group dev
 
