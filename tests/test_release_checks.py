@@ -332,16 +332,30 @@ def test_published_retries_until_the_index_serves_the_files(
     assert len(urls) == 7
 
 
-def test_published_rejects_different_files(
+def test_published_fails_at_once_on_a_different_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_checks: ModuleType
 ) -> None:
     dist = _published_dist(tmp_path, monkeypatch)
     served = _served(release_checks, dist)
     (dist / "omnigent_muse-0.1.0.tar.gz").write_bytes(b"rebuilt sdist")
-    _index(monkeypatch, release_checks, [served, served])
+    urls = _index(monkeypatch, release_checks, [served, served])
 
     with pytest.raises(release_checks.CheckError, match="do not match"):
         release_checks.check_published("pypi", dist, attempts=2, delay=0)
+    assert len(urls) == 1
+
+
+def test_published_waits_while_files_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_checks: ModuleType
+) -> None:
+    dist = _published_dist(tmp_path, monkeypatch)
+    served = json.loads(_served(release_checks, dist))
+    wheel_only = json.dumps({"urls": served["urls"][1:]}).encode()
+    urls = _index(monkeypatch, release_checks, [wheel_only, wheel_only])
+
+    with pytest.raises(release_checks.CheckError, match="do not match"):
+        release_checks.check_published("pypi", dist, attempts=2, delay=0)
+    assert len(urls) == 2
 
 
 def test_published_rejects_an_empty_directory(

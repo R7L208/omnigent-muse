@@ -35,8 +35,12 @@ core's namespace extending can't see, so the plugin's modules won't import.
 
 ## Development
 
+Development needs [uv](https://docs.astral.sh/uv/) 0.12 or later and
+[just](https://just.systems/). Set `UV_INDEX_URL=https://pypi.org/simple` in
+`.env` (see `.env.example`) to install from public PyPI.
+
 ```sh
-just ensure        # .venv with the released Omnigent from PyPI and the dev tools
+just ensure        # .venv with the newest released Omnigent and the dev tools
 just check         # lint, type check, and the unit suite
 just core-sibling  # optional: swap in a sibling ../omnigent checkout, as CI does with main
 ```

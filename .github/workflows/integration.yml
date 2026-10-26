@@ -105,18 +105,7 @@ jobs:
 
       - name: Verify installed plugin discovery
         working-directory: ${{ runner.temp }}
-        run: |
-          "$RUNNER_TEMP/venv/bin/python" -I - <<'PY'
-          import importlib.metadata
-          import omnigent.community.harness.muse.plugin as plugin
-          from omnigent.harness_plugins import plugin_state, valid_harnesses
-
-          assert "site-packages" in plugin.__file__, plugin.__file__
-          state = plugin_state()
-          assert state.load_errors == {}, state.load_errors
-          assert "muse" in valid_harnesses()
-          print("omnigent", importlib.metadata.version("omnigent"))
-          PY
+        run: '"$RUNNER_TEMP/venv/bin/python" -I "$GITHUB_WORKSPACE/omnigent-muse/.github/scripts/release/check-release.py" discovery --installed'
 
       - name: Run integration tests
         working-directory: omnigent-muse

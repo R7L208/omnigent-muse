@@ -71,8 +71,9 @@ jobs:
 
       - name: Install plugin with dependency heads
         working-directory: omnigent-muse
-        # uv.lock pins released Omnigent; replace it with main, non-editable
-        # as `just core-sibling` does locally.
+        # uv.lock is not committed, so `uv sync` resolves the newest released
+        # Omnigent; replace it with main, non-editable, as `just core-sibling`
+        # does locally.
         run: |
           uv sync --group dev
           uv pip install --python .venv/bin/python \
@@ -86,14 +87,7 @@ jobs:
 
       - name: Verify plugin discovery
         working-directory: omnigent-muse
-        run: |
-          uv run --no-sync python - <<'PY'
-          from omnigent.harness_plugins import plugin_state, valid_harnesses
-
-          state = plugin_state()
-          assert state.load_errors == {}, state.load_errors
-          assert "muse" in valid_harnesses()
-          PY
+        run: uv run --no-sync python .github/scripts/release/check-release.py discovery
 
   released:
     # The unit suite against the released Omnigent versions the package
@@ -132,11 +126,16 @@ jobs:
           OMNIGENT: ${{ matrix.omnigent }}
         run: |
           spec="$(python .github/scripts/release/check-release.py spec "$OMNIGENT")"
-          uv sync --group dev
-          uv pip install --python .venv/bin/python --reinstall-package omnigent "$spec"
+          # Everything but Omnigent from the sync, then Omnigent once, at the
+          # version this leg tests.
+          uv sync --group dev --no-install-package omnigent
+          uv pip install --python .venv/bin/python "$spec"
           .venv/bin/python -c 'import importlib.metadata as m; print("omnigent", m.version("omnigent"))'
 
       - name: Run tests
         env:
           PYTHONFAULTHANDLER: "1"
         run: uv run --no-sync pytest -q
+
+      - name: Verify plugin discovery
+        run: uv run --no-sync python .github/scripts/release/check-release.py discovery

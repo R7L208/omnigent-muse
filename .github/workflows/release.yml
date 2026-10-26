@@ -75,12 +75,21 @@ jobs:
             echo "latest=$latest"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Check the tagged commit is on main
+      - name: Check the tag is annotated and on main
         # Only reviewed, merged code is released. "behind" or "identical"
-        # means the commit is an ancestor of main.
+        # means the commit is an ancestor of main. This step runs from the
+        # tagged commit, so it guards against mistakes; against a tag pushed
+        # from an edited branch, the environment reviewer is the control
+        # (RELEASING.md).
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
+          type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.type)"
+          if [[ "$type" != "tag" ]]; then
+            echo "::error::$TAG is a lightweight tag; push an annotated tag (git tag -a) before creating the Release"
+            exit 1
+          fi
           status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)"
           if [[ "$status" != "behind" && "$status" != "identical" ]]; then
             echo "::error::$GITHUB_SHA is not on main (compare status: $status); tag a commit from main"
@@ -154,18 +163,7 @@ jobs:
 
       - name: Verify plugin discovery from outside the checkout
         working-directory: ${{ runner.temp }}
-        run: |
-          "$RUNNER_TEMP/venv/bin/python" -I - <<'PY'
-          import importlib.metadata
-          import omnigent.community.harness.muse.plugin as plugin
-          from omnigent.harness_plugins import plugin_state, valid_harnesses
-
-          assert "site-packages" in plugin.__file__, plugin.__file__
-          state = plugin_state()
-          assert state.load_errors == {}, state.load_errors
-          assert "muse" in valid_harnesses()
-          print("omnigent", importlib.metadata.version("omnigent"))
-          PY
+        run: '"$RUNNER_TEMP/venv/bin/python" -I "$GITHUB_WORKSPACE/.github/scripts/release/check-release.py" discovery --installed'
 
       - name: Run the unit suite against the installed wheel
         env:
@@ -298,19 +296,7 @@ jobs:
 
       - name: Verify the installed release
         working-directory: ${{ runner.temp }}
-        run: |
-          "$RUNNER_TEMP/venv/bin/python" -I - <<'PY'
-          import importlib.metadata
-          import os
-          from omnigent.harness_plugins import plugin_state, valid_harnesses
-
-          version = importlib.metadata.version("omnigent-muse")
-          assert version == os.environ["VERSION"], version
-          state = plugin_state()
-          assert state.load_errors == {}, state.load_errors
-          assert "muse" in valid_harnesses()
-          print("omnigent-muse", version, "omnigent", importlib.metadata.version("omnigent"))
-          PY
+        run: '"$RUNNER_TEMP/venv/bin/python" -I "$GITHUB_WORKSPACE/.github/scripts/release/check-release.py" discovery --installed --version "$VERSION"'
 
       - name: Run the echo integration tests against the release
         env:

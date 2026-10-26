@@ -4,8 +4,8 @@ A release is a version-bump PR, then a GitHub Release. Publishing the Release
 runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
 
 1. checks that the tag is exactly `v<project.version>`, that the GitHub
-   pre-release flag matches the version, and that the tagged commit is on
-   `main`;
+   pre-release flag matches the version, that the tag is annotated, and
+   that the tagged commit is on `main`;
 2. builds the wheel and sdist once, and checks them with `twine check` and
    [`check-release.py`](.github/scripts/release/check-release.py) (plugin
    modules, entry point, the same bounded Omnigent dependency as
@@ -62,10 +62,13 @@ a release candidate to TestPyPI:
 
 1. Open a PR that sets `version = "X.Y.ZrcN"` in `pyproject.toml`, and merge
    it.
-2. Create a GitHub Release with tag `vX.Y.ZrcN` targeting `main`, and check
+2. Tag the merge commit with an annotated tag `vX.Y.ZrcN`, as in step 3 of
+   the [release checklist](#release-checklist).
+3. Create a GitHub Release from that existing tag, and check
    **Set as a pre-release**.
-3. Approve the `testpypi` deployment when the workflow asks, then check that
-   every job passes.
+4. Check the run as described in
+   [Approving a deployment](#approving-a-deployment), approve the `testpypi`
+   deployment, then check that every job passes.
 
 TestPyPI never accepts the same version twice, so each rehearsal needs the
 next `rcN`.
@@ -88,14 +91,37 @@ next `rcN`.
      results in the PR.
 2. **Merge it** once CI is green, and wait for the `main` push CI to pass on
    the merge commit.
-3. **Create the GitHub Release.** Choose a new tag `vX.Y.Z` targeting `main`,
-   use the version as the title, and paste the changelog section as the
-   notes. Leave **Set as a pre-release** cleared for a final version.
-   Publishing the Release starts the workflow.
-4. **Approve the deployment** to `pypi` when the workflow asks.
-5. **Check the result.** All jobs pass, the Release has the wheel and sdist
+3. **Tag the merge commit.** The workflow requires an annotated tag, and the
+   Release form only creates lightweight ones:
+
+   ```sh
+   git fetch origin
+   git tag -a vX.Y.Z -m "omnigent-muse X.Y.Z" origin/main
+   git push origin vX.Y.Z
+   ```
+
+4. **Create the GitHub Release** from the existing tag `vX.Y.Z`. Use the
+   version as the title, and paste the changelog section as the notes. Leave
+   **Set as a pre-release** cleared for a final version. Publishing the
+   Release starts the workflow.
+5. **Approve the deployment** to `pypi` when the workflow asks, after the
+   checks in [Approving a deployment](#approving-a-deployment).
+6. **Check the result.** All jobs pass, the Release has the wheel and sdist
    attached, and <https://pypi.org/project/omnigent-muse/> shows the new
    version.
+
+## Approving a deployment
+
+A Release runs `release.yml` as it is at the tagged commit. Its "on `main`"
+check therefore catches mistakes, but someone who can push a tag could tag a
+branch where that check was edited out. The environment reviewer is the real
+control. Before approving:
+
+- Note the commit on the run's summary page, and confirm it is on `main`:
+  `git fetch origin && git merge-base --is-ancestor <sha> origin/main`
+  exits 0.
+- Confirm the `build` job passed its "Check the tag is annotated and on
+  main" step.
 
 ## If a release fails
 

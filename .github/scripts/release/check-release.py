@@ -19,17 +19,24 @@ public index metadata. Run from the repository root.
       Prints the Omnigent requirement to test against: ``omnigent==<floor>``
       for the minimum pyproject.toml declares, or the declared range itself
       for the latest release it allows.
+  discovery [--installed] [--version VERSION]
+      Run with the Python of the environment to check. Omnigent loads the
+      muse harness with no plugin load errors. --installed also requires the
+      plugin to import from site-packages (a real install, not the checkout),
+      and --version that the installed omnigent-muse is VERSION.
   published INDEX DIR
       INDEX ("pypi" or "testpypi") serves exactly the files in DIR, with the
       same sha256 digests: the validated artifacts are the ones published.
       Retries while the index catches up, including over dropped
-      connections.
+      connections, and fails at once if it serves a file with another
+      digest.
 """
 
 from __future__ import annotations
 
 import hashlib
 import http.client
+import importlib.metadata
 import json
 import re
 import sys
@@ -219,6 +226,38 @@ def check_dist(dist: Path) -> None:
     print(f"{wheel.name} and {sdist.name} look right")
 
 
+def check_discovery(options: list[str]) -> None:
+    installed = "--installed" in options
+    rest = [o for o in options if o != "--installed"]
+    match rest:
+        case []:
+            version = None
+        case ["--version", version]:
+            pass
+        case _:
+            raise CheckError(f"unknown discovery options: {options}")
+
+    # Imported here: the other subcommands run without Omnigent installed.
+    from omnigent.harness_plugins import plugin_state, valid_harnesses
+
+    from omnigent.community.harness.muse import plugin
+
+    if installed and "site-packages" not in (plugin.__file__ or ""):
+        raise CheckError(f"plugin imports from {plugin.__file__}, not site-packages")
+    found = importlib.metadata.version(PROJECT)
+    if version is not None and found != version:
+        raise CheckError(f"installed {PROJECT} is {found}, not {version}")
+    state = plugin_state()
+    if state.load_errors:
+        raise CheckError(f"plugin load errors: {state.load_errors}")
+    if "muse" not in valid_harnesses():
+        raise CheckError(f"muse is not a valid harness: {sorted(valid_harnesses())}")
+    print(
+        f"{PROJECT} {found} with omnigent {importlib.metadata.version('omnigent')}: "
+        "muse harness discovered"
+    )
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -253,6 +292,14 @@ def check_published(
         if served == expected:
             print(f"{index} serves the validated artifacts for {PROJECT} {version}")
             return
+        # Waiting only helps while files are still missing. A file that is
+        # not ours, or one with another digest, will not change.
+        wrong = sorted(n for n in served if expected.get(n) != served[n])
+        if wrong:
+            raise CheckError(
+                f"{index} serves {wrong} with digests that do not match the "
+                f"validated artifacts: served {served}, expected {expected}"
+            )
         if served:
             print(f"attempt {attempt}: {index} serves {sorted(served)}")
         if attempt < attempts:
@@ -269,6 +316,8 @@ def main(argv: list[str]) -> int:
                 print(check_version(tag, prerelease))
             case ["dist", dist]:
                 check_dist(Path(dist))
+            case ["discovery", *options]:
+                check_discovery(options)
             case ["spec", leg]:
                 print(omnigent_spec(leg))
             case ["published", index, dist]:
