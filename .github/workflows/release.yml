@@ -1,0 +1,306 @@
+name: Release
+
+# Publishes a GitHub Release to PyPI, or a GitHub pre-release to TestPyPI
+# (see RELEASING.md). The wheel and sdist are built once. Those exact files are
+# tested against the minimum and latest Omnigent, published through Trusted
+# Publishing, checked on the index by sha256 and reinstalled from it for a
+# smoke test, and only then attached to the Release. Only the publish job can mint an
+# OIDC token, and it runs in a protected environment. To recover from a failed
+# job, use "Re-run failed jobs": it reuses this run's built files, whereas
+# "Re-run all jobs" rebuilds them with different digests.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+  META_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  OPENAI_API_KEY: ""
+  OPENROUTER_API_KEY: ""
+  # Pinned so a release is tested the same way each time.
+  TEST_TOOLS: pytest==9.1.1 pytest-asyncio==1.4.0
+
+jobs:
+  build:
+    name: Build and check distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      index: ${{ steps.version.outputs.index }}
+      minimum: ${{ steps.version.outputs.minimum }}
+      latest: ${{ steps.version.outputs.latest }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.15"
+
+      - name: Check the tag matches the version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          version="$(python .github/scripts/release/check-release.py version "$TAG" "$PRERELEASE")"
+          minimum="$(python .github/scripts/release/check-release.py spec minimum)"
+          latest="$(python .github/scripts/release/check-release.py spec latest)"
+          if [[ "$PRERELEASE" == "true" ]]; then index=testpypi; else index=pypi; fi
+          echo "Releasing omnigent-muse $version to $index (testing $minimum and $latest)"
+          {
+            echo "version=$version"
+            echo "index=$index"
+            echo "minimum=$minimum"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag is annotated and on main
+        # Only reviewed, merged code is released. "behind" or "identical"
+        # means the commit is an ancestor of main. This step runs from the
+        # tagged commit, so it guards against mistakes; against a tag pushed
+        # from an edited branch, the environment reviewer is the control
+        # (RELEASING.md).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.type)"
+          if [[ "$type" != "tag" ]]; then
+            echo "::error::$TAG is a lightweight tag; push an annotated tag (git tag -a) before creating the Release"
+            exit 1
+          fi
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)"
+          if [[ "$status" != "behind" && "$status" != "identical" ]]; then
+            echo "::error::$GITHUB_SHA is not on main (compare status: $status); tag a commit from main"
+            exit 1
+          fi
+
+      - name: Build distributions
+        run: uv build --out-dir dist
+
+      - name: Validate distributions
+        run: |
+          uvx --from twine==6.2.0 twine check --strict dist/*
+          python .github/scripts/release/check-release.py dist dist
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    name: Test the wheel with Omnigent ${{ matrix.omnigent.name }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        omnigent:
+          - name: minimum
+            spec: ${{ needs.build.outputs.minimum }}
+          - name: latest
+            spec: ${{ needs.build.outputs.latest }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.15"
+
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+
+      - name: Install pinned Muse CLI
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+        run: bash .github/scripts/install-muse.sh
+
+      - name: Install the wheel and Omnigent from PyPI
+        env:
+          OMNIGENT_SPEC: ${{ matrix.omnigent.spec }}
+        run: |
+          uv venv "$RUNNER_TEMP/venv" --python 3.12
+          # shellcheck disable=SC2086 # TEST_TOOLS is a list of requirements.
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" \
+            "$RUNNER_TEMP"/dist/*.whl "$OMNIGENT_SPEC" $TEST_TOOLS
+
+      - name: Verify plugin discovery from outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: '"$RUNNER_TEMP/venv/bin/python" -I "$GITHUB_WORKSPACE/.github/scripts/release/check-release.py" discovery --installed'
+
+      - name: Run the unit suite against the installed wheel
+        env:
+          PYTHONFAULTHANDLER: "1"
+        # The venv's pytest does not put the checkout on sys.path, so the
+        # tests import the plugin from the installed wheel, not from src/.
+        run: |
+          "$RUNNER_TEMP/venv/bin/pytest" -q -p no:cacheprovider --ignore=tests/integration
+
+      - name: Run the echo integration tests against the installed wheel
+        env:
+          OMNIGENT_MUSE_INTEGRATION: "1"
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          "$RUNNER_TEMP/venv/bin/pytest" tests/integration -v -p no:cacheprovider
+
+  attach:
+    name: Attach distributions to the Release
+    # After smoke has checked the index serves these exact files, so the
+    # Release never lists files the index does not have, or different ones.
+    needs: [build, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Upload to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        # --clobber lets a re-run replace a partial upload with the same files.
+        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish:
+    name: Publish to ${{ needs.build.outputs.index }}
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: ${{ needs.build.outputs.index }}
+      url: ${{ needs.build.outputs.index == 'testpypi' && 'https://test.pypi.org' || 'https://pypi.org' }}/project/omnigent-muse/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish through Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          # A re-run after a partial upload skips the file already accepted.
+          # Skipped files are not compared here, so the smoke job checks
+          # every served file's sha256 before anything is attached.
+          skip-existing: true
+          repository-url: ${{ needs.build.outputs.index == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+
+  smoke:
+    name: Smoke-test the published release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      INDEX: ${{ needs.build.outputs.index }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.15"
+
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+
+      - name: Check the index serves the validated files
+        run: python .github/scripts/release/check-release.py published "$INDEX" "$RUNNER_TEMP/dist"
+
+      - name: Install pinned Muse CLI
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+        run: bash .github/scripts/install-muse.sh
+
+      - name: Install the release from the index
+        run: |
+          if [[ "$INDEX" == "testpypi" ]]; then
+            simple=https://test.pypi.org/simple
+          else
+            simple=https://pypi.org/simple
+          fi
+          uv venv "$RUNNER_TEMP/venv" --python 3.12
+          # The plugin alone from the release index (TestPyPI may lack, or
+          # squat, its dependencies); the simple index can trail the JSON API.
+          for attempt in 1 2 3 4 5 6; do
+            if uv pip install --python "$RUNNER_TEMP/venv/bin/python" --refresh \
+                --no-deps --index-url "$simple" "omnigent-muse==$VERSION"; then
+              break
+            fi
+            if [[ "$attempt" == 6 ]]; then exit 1; fi
+            sleep 30
+          done
+          # Then its declared dependencies, from PyPI.
+          mapfile -t requires < <("$RUNNER_TEMP/venv/bin/python" -I -c \
+            'import importlib.metadata as m; print("\n".join(m.requires("omnigent-muse") or []))')
+          # shellcheck disable=SC2086 # TEST_TOOLS is a list of requirements.
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" \
+            "${requires[@]}" $TEST_TOOLS
+          uv pip check --python "$RUNNER_TEMP/venv/bin/python"
+
+      - name: Verify the installed release
+        working-directory: ${{ runner.temp }}
+        run: '"$RUNNER_TEMP/venv/bin/python" -I "$GITHUB_WORKSPACE/.github/scripts/release/check-release.py" discovery --installed --version "$VERSION"'
+
+      - name: Run the echo integration tests against the release
+        env:
+          OMNIGENT_MUSE_INTEGRATION: "1"
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          "$RUNNER_TEMP/venv/bin/pytest" tests/integration -v -p no:cacheprovider

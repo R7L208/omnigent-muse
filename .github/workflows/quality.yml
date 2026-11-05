@@ -36,13 +36,6 @@ jobs:
           path: omnigent-muse
           persist-credentials: false
 
-      - name: Check out Omnigent
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: omnigent-ai/omnigent
-          path: omnigent
-          persist-credentials: false
-
       - name: Check out Muse SDK
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -120,7 +113,11 @@ jobs:
         run: uv build --out-dir dist
 
       - name: Validate distributions
-        run: uvx --from twine twine check dist/*
+        # The same checks release.yml runs, so packaging problems fail here
+        # rather than after a Release is published.
+        run: |
+          uvx --from twine==6.2.0 twine check --strict dist/*
+          python .github/scripts/release/check-release.py dist dist
 
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

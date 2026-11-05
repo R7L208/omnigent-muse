@@ -9,6 +9,19 @@ description = "Muse Code (MSP) community harness for Omnigent"
 readme = "README.md"
 requires-python = ">=3.12"          # match omnigent (the Muse SDK itself is 3.10+)
 license = "Apache-2.0"
+authors = [{ name = "Lorin Dawson" }]
+keywords = ["omnigent", "muse", "muse-code", "harness", "agent", "msp"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
 dependencies = [
   "omnigent>=0.16.0,<1",            # first release with all imported harness and sandbox APIs
 ]
@@ -21,6 +34,12 @@ dev = [
   "ruff>=0.11",
 ]
 
+[project.urls]
+Homepage = "https://github.com/R7L208/omnigent-muse"
+Repository = "https://github.com/R7L208/omnigent-muse"
+Issues = "https://github.com/R7L208/omnigent-muse/issues"
+Changelog = "https://github.com/R7L208/omnigent-muse/blob/main/CHANGELOG.md"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
@@ -30,7 +49,3 @@ muse = "omnigent.community.harness.muse.plugin:get_contribution"
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = true
-
-# Local sibling checkout for offline/dev installs. Remove before publishing.
-[tool.uv.sources]
-omnigent      = { path = "../omnigent", editable = true }

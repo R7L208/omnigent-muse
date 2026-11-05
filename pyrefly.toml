@@ -7,5 +7,5 @@ project-excludes = []
 disable-project-excludes-heuristics = true
 
 python-version = "3.12"
-search-path = ["src", "../omnigent"]
+search-path = ["src"]
 disable-search-path-heuristics = true
