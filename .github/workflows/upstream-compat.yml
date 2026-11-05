@@ -71,13 +71,12 @@ jobs:
 
       - name: Install plugin with dependency heads
         working-directory: omnigent-muse
-        # uv.lock is not committed, so `uv sync` resolves the newest released
-        # Omnigent; replace it with main, non-editable, as `just core-sibling`
-        # does locally.
+        # Everything but Omnigent from the sync, then Omnigent once, from main
+        # and non-editable, as `just core-sibling` does locally.
         run: |
-          uv sync --group dev
-          uv pip install --python .venv/bin/python \
-            --reinstall-package omnigent --no-editable ../omnigent
+          uv sync --group dev --no-install-package omnigent
+          uv pip install --python .venv/bin/python --no-editable ../omnigent
+          .venv/bin/python -c 'import importlib.metadata as m; print("omnigent", m.version("omnigent"))'
 
       - name: Run tests
         working-directory: omnigent-muse
