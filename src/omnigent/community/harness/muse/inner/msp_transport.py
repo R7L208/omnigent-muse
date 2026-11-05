@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -17,6 +19,7 @@ from .msp_client import (
     MspClient,
     MspConnectionClosed,
     MspError,
+    MspEvent,
     MspItemUpdate,
     MspProtocolError,
     MspTextDelta,
@@ -39,6 +42,10 @@ from .sandbox_launch import MuseLaunch, MuseSandbox, MuseSandboxError
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
+# Muse's approval verbs, normalized to the executor's allow/deny. Only the
+# one-shot approval maps to "allow"; session-wide and persisted grants keep
+# their own names, so a policy verdict can never select them.
+_HOST_DECISIONS = {"approved": "allow", "abort": "deny", "denied": "deny"}
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +67,17 @@ def _object(value: object) -> JsonObject:
 
 def _first_str(*values: object) -> str | None:
     return next((value for value in values if isinstance(value, str) and value), None)
+
+
+def _raw_args(raw: JsonObject, default: object) -> object:
+    """Decode Muse's ``rawArgs`` JSON string, else return ``default``."""
+    text = raw.get("rawArgs")
+    if not isinstance(text, str):
+        return default
+    try:
+        return json.loads(text)
+    except ValueError:
+        return default
 
 
 def _cleanup_abandoned_launch(task: asyncio.Future[MuseLaunch]) -> None:
@@ -188,6 +206,7 @@ class MspTransport:
         workspace_root: str | None,
         model: str | None,
         approval_mode: str,
+        mcp_servers: dict[str, JsonObject] | None = None,
     ) -> str:
         try:
             client = await self._get_client()
@@ -195,6 +214,7 @@ class MspTransport:
                 workspace_root=workspace_root,
                 model_id=model,
                 approval_mode=approval_mode,
+                mcp_servers=mcp_servers,
             )
             session_id = _first_str(session.get("sessionId"), session.get("id"))
             if session_id is None:
@@ -214,7 +234,14 @@ class MspTransport:
         *,
         text: str,
         reasoning_effort: str | None,
+        busy: Callable[[], bool] | None = None,
     ) -> AsyncIterator[MuseEvent]:
+        """Run one turn, failing if Muse is silent for the idle timeout.
+
+        :param busy: Returns whether work Muse is waiting on is still in
+            progress (a relayed Omnigent call); the idle timeout does not
+            fire while it returns true.
+        """
         try:
             client = await self._get_client()
             with client.open_stream(session_id) as stream:
@@ -233,15 +260,9 @@ class MspTransport:
                 events = stream.follow(turn_id)
                 while True:
                     try:
-                        async with asyncio.timeout(self._idle_timeout):
-                            event = await anext(events)
+                        event = await self._next_event(events, busy)
                     except StopAsyncIteration:
                         break
-                    except TimeoutError as exc:
-                        raise MuseTransportError(
-                            f"Muse turn produced no events for {self._idle_timeout:g}s",
-                            retryable=True,
-                        ) from exc
                     if isinstance(event, MspTextDelta):
                         kind = self._item_kinds.get(event.item_id)
                         if kind == "reasoning" or (
@@ -292,6 +313,28 @@ class MspTransport:
                         )
         except (MspConnectionClosed, MspError, MspProtocolError) as exc:
             raise await self._handle_error(exc) from exc
+
+    async def _next_event(
+        self, events: AsyncIterator[MspEvent], busy: Callable[[], bool] | None
+    ) -> MspEvent:
+        # Waits on one task rather than cancelling on each timeout: cancelling
+        # anext() would close the stream while a busy turn is still running.
+        pending = asyncio.ensure_future(anext(events))
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=self._idle_timeout)
+                if done:
+                    return pending.result()
+                if busy is None or not busy():
+                    raise MuseTransportError(
+                        f"Muse turn produced no events for {self._idle_timeout:g}s",
+                        retryable=True,
+                    )
+        finally:
+            if not pending.done():
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await pending
 
     async def decide_approval(
         self, session_id: str, approval_id: str, choice_id: str
@@ -384,10 +427,14 @@ class MspTransport:
                 label = (
                     _first_str(choice.get("label"), choice.get("title")) or choice_id
                 )
-                decision = _first_str(
-                    choice.get("decision"), choice.get("kind"), choice.get("value")
-                ) or self._decision(choice_id)
-                choices.append(MuseApprovalChoice(choice_id, label, decision.lower()))
+                decision = (
+                    _first_str(
+                        choice.get("decision"), choice.get("kind"), choice.get("value")
+                    )
+                    or self._decision(choice_id)
+                ).lower()
+                decision = _HOST_DECISIONS.get(decision, decision)
+                choices.append(MuseApprovalChoice(choice_id, label, decision))
         return MuseApprovalRequested(
             approval_id=event.approval_id,
             tool_name=_first_str(
@@ -402,7 +449,10 @@ class MspTransport:
                 raw.get(
                     "arguments",
                     requirement.get(
-                        "arguments", approval.get("arguments", raw.get("subject", {}))
+                        "arguments",
+                        approval.get(
+                            "arguments", _raw_args(raw, raw.get("subject", {}))
+                        ),
                     ),
                 ),
             ),
